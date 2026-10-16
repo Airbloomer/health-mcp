@@ -165,11 +165,11 @@ Add a remote MCP server with the URL and header above. A Cursor `mcp.json` examp
 
 Start a new chat with the connector turned on and ask:
 
-- "How did I sleep and train this week?"
+- "How did I train this week?"
 - "How many steps did I take yesterday?"
-- "Show my weight over the last 30 days."
+- "How did I sleep this week?" (Android, with sleep enabled)
 
-Your data appears only after the phone app's first sync. Sleep answers need the optional Android setting from step 1.
+Your data appears only after the phone app's first sync. The sleep question works only on Android, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
 
 ✅ **Checkpoint:** the chatbot calls a health-mcp tool and answers with your numbers.
 
