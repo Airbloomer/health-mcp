@@ -231,11 +231,12 @@ async function ingestShortcuts(req, ctx) {
   // passed, so a request with an Authorization header used HEALTH_INGEST_TOKEN.
   // URL-token rows go through the guarded upsert with n = 0: they can create a
   // day or update a day the URL token itself wrote, never lower a day with n >= 1.
+  // URL-token workouts are insert-only and never change an existing workout.
   const bearer = Boolean(req.headers.get("authorization"));
   const points = bearer ? rows : rows.map(({ replace, ...row }) => ({ ...row, n: 0 }));
   return storeIngest(ctx, {
     points,
-    workouts: parsed.workouts,
+    workouts: bearer ? parsed.workouts : parsed.workouts.map((workout) => ({ ...workout, insertOnly: true })),
     samples: kept.length,
     bytes: text.length,
     payload: text,

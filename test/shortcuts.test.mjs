@@ -192,10 +192,7 @@ test("raw mode: iPhone and Watch overlap counts one source (Watch first by defau
 
 test("daily mode stores the day total and a re-send replaces it, even with a lower value", async () => {
   const storage = new MemoryStorage();
-  const day = (value) => ({ samples: [
-    { kind: "daily", type: "Steps", value, date: "2026-10-14" },
-    { type: "Steps", value: "999", start: "2026-10-14T10:00:00-07:00" },
-  ] });
+  const day = (value) => ({ samples: [{ kind: "daily", type: "Steps", value, date: "2026-10-14" }] });
   assert.equal((await post(storage, day("8000"))).status, 200);
   assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 8000);
   await post(storage, day("8000"));
@@ -295,3 +292,80 @@ test("URL-token requests cannot lower a day written with Bearer; Bearer resends 
   await urlOnly(day("900"));
   assert.equal((await fresh.queryDaySummary("2026-10-14")).steps, 900);
 });
+
+test("a daily total and raw samples for the same metric-day in one request are rejected", () => {
+  const opts = { timeZone: "UTC", now: NOW };
+  assert.deepEqual(shortcutsError({ samples: [
+    { kind: "daily", type: "Steps", value: "8000", date: "2026-10-14" },
+    { type: "Steps", value: "999", start: "2026-10-14T10:00:00Z" },
+  ] }, opts), { error: "invalid_payload", at: "samples[1]", field: "kind" });
+  assert.deepEqual(shortcutsError({ samples: [
+    { type: "Steps", value: "999", start: "2026-10-14T10:00:00Z" },
+    { kind: "daily", type: "Steps", value: "8000", date: "2026-10-14" },
+  ] }, opts), { error: "invalid_payload", at: "samples[1]", field: "kind" });
+  assert.equal(shortcutsError({ samples: [
+    { kind: "daily", type: "Steps", value: "8000", date: "2026-10-14" },
+    { type: "Steps", value: "999", start: "2026-10-13T10:00:00Z" },
+    { type: "Active Energy", value: "9", start: "2026-10-14T10:00:00Z" },
+  ] }, opts), null);
+});
+
+test("a local time inside the DST spring-forward gap is rejected", () => {
+  const opts = { timeZone: "America/Los_Angeles", now: NOW };
+  assert.deepEqual(shortcutsError({ samples: [{ type: "Steps", value: "1", start: "2026-03-08T02:30:00" }] }, opts), { error: "invalid_payload", at: "samples[0]", field: "start" });
+  assert.equal(shortcutsError({ samples: [{ type: "Steps", value: "1", start: "2026-03-08T03:30:00" }] }, opts), null);
+  assert.equal(shortcutsError({ samples: [{ type: "Steps", value: "1", start: "2026-03-08T02:30:00" }] }, { timeZone: "UTC", now: NOW }), null);
+});
+
+async function shortcutsFlow(storage) {
+  const extra = { urlToken: URL_SECRET };
+  const viaBearer = (payload) => handleRequest(request("/ingest/shortcuts", { body: JSON.stringify(payload) }), ctx(storage, extra));
+  const viaUrl = (payload) => handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { token: "", body: JSON.stringify(payload) }), ctx(storage, extra));
+  return { viaBearer, viaUrl };
+}
+
+for (const [label, make] of [
+  ["memory", () => new MemoryStorage()],
+  ["SQLite", async () => (await import("../src/adapters/sqlite.js")).createSqliteStorage(":memory:")],
+]) {
+  test(`${label}: a Bearer daily total replaces the metric-day whatever app wrote it`, async () => {
+    const storage = await make();
+    const hae = { data: { metrics: [{ name: "step_count", units: "count", data: [
+      { date: "2026-10-14 09:00:00 -0700", qty: 6000 },
+      { date: "2026-10-14 10:00:00 -0700", qty: 3000 },
+    ] }] } };
+    assert.equal((await handleRequest(request("/ingest", { body: JSON.stringify(hae) }), ctx(storage))).status, 200);
+    assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 9000);
+    const { viaBearer, viaUrl } = await shortcutsFlow(storage);
+    assert.equal((await viaUrl({ samples: [{ kind: "daily", type: "Steps", value: "1", date: "2026-10-14" }] })).status, 200);
+    assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 9000);
+    assert.equal((await viaBearer({ samples: [{ kind: "daily", type: "Steps", value: "8100", date: "2026-10-14" }] })).status, 200);
+    assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 8100);
+  });
+
+  test(`${label}: URL-token workouts are insert-only`, async () => {
+    const storage = await make();
+    const { viaBearer, viaUrl } = await shortcutsFlow(storage);
+    const run = (duration) => ({ workouts: [{ type: "Running", start: "2026-10-14T07:00:00-07:00", duration }] });
+    assert.equal((await viaBearer(run("1800"))).status, 200);
+    assert.equal((await viaUrl(run("18000"))).status, 200);
+    assert.equal((await storage.queryDaySummary("2026-10-14")).workouts[0].duration_min, 30);
+    assert.equal((await viaUrl({ workouts: [{ type: "Walking", start: "2026-10-14T12:00:00-07:00", duration: "600" }] })).status, 200);
+    assert.equal((await storage.queryDaySummary("2026-10-14")).workouts.length, 2);
+    assert.equal((await viaBearer(run("2400"))).status, 200);
+    const runRow = (await storage.queryDaySummary("2026-10-14")).workouts.find((w) => w.name === "Running");
+    assert.equal(runRow.duration_min, 40);
+  });
+
+  test(`${label}: URL token cannot lower a Bearer day; Bearer resend replaces`, async () => {
+    const storage = await make();
+    const { viaBearer, viaUrl } = await shortcutsFlow(storage);
+    const day = (value) => ({ samples: [{ kind: "daily", type: "Steps", value, date: "2026-10-14" }] });
+    await viaBearer(day("5000"));
+    await viaUrl(day("1"));
+    await viaUrl({ samples: [1, 2, 3].map((h) => ({ type: "Steps", value: "0.5", start: `2026-10-14T0${h}:00:00Z` })) });
+    assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 5000);
+    await viaBearer(day("4200"));
+    assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 4200);
+  });
+}

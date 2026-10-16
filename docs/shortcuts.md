@@ -9,7 +9,9 @@ A free iPhone option with no extra app. The Shortcuts app that comes with iPhone
 - **Daily totals (default, recommended).** The Shortcut asks Health for one value per metric per day with the **Group By** option of **Find Health Samples** set to **Day**. Health is expected to combine iPhone and Apple Watch samples into one de-duplicated daily sum *(unverified on a real iPhone; please check the number against the Health app)*. Each entry is sent with `"kind": "daily"` and is stored as that day's total.
 - **Raw samples.** The Shortcut sends individual samples. Use this only if Group By Day does not work for you. A **Source** filter step is required (see below), and the server also keeps one source per metric per day as a backstop.
 
-Either way, a request sent with the `Authorization: Bearer` header **replaces** the stored day for every metric-day it contains. Re-sending the same day gives the same result, and a later value wins even if it is lower. Sample counts are not compared. Requests authenticated with the URL token do not replace (see Auth). So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
+Either way, a request sent with the `Authorization: Bearer` header **replaces** the stored day for every metric-day it contains. Re-sending the same day gives the same result, and a later value wins even if it is lower. Sample counts are not compared. Requests authenticated with the URL token do not replace (see Auth).
+
+**One ingest path per metric.** A Bearer daily total is meant to be the complete day, because Health already merges every source. It therefore replaces that metric-day **whatever app wrote it** (Health Auto Export, SyncFit, an Apple Health import, or an earlier run). This is intended. If another app also sends steps, the last writer wins for that day, so send each metric through only one path. So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
 
 ## Request format
 
@@ -38,7 +40,7 @@ Raw mode:
 }
 ```
 
-The body is an object with a `samples` array, a `workouts` array, or both. Daily and raw entries may be mixed; for the same metric and day, the daily entry wins and the raw ones are ignored.
+The body is an object with a `samples` array, a `workouts` array, or both. Daily and raw entries may be mixed in one request, but not for the same metric and day: a daily total and raw samples for the same metric-day are rejected with `400` and a locator on the second of them (`"field":"kind"`).
 
 **Sample fields**
 
@@ -50,11 +52,11 @@ The body is an object with a `samples` array, a `workouts` array, or both. Daily
 | `unit` | no | Energy: `kcal` (default), `Cal`, or `kJ`; stored as kcal. Weight: `kg` (default), `g`, `lb`, `lbs`, or `st`; stored as kg. Body fat: `%` (0 to 100). Protein, carbohydrates, fat: `g`. |
 | `start` | yes | ISO 8601. `date` is accepted as an alias. For a daily entry, a date alone is enough. |
 | `end` | no | ISO 8601, not before `start`. |
-| `source` | no | Raw mode: the sample's source name, used to pick one source per metric-day. |
+| `source` | no | Raw mode: the sample's source name, used to pick one source per metric-day. Raw samples **without** `source` are all treated as one source and summed, so iPhone and Apple Watch samples for the same minutes may be counted twice. The Source filter step in raw mode is the fix. |
 
 **Workout fields:** `start` (required), `type` (activity name, for example `Running`), `end` (not before `start`) and/or `duration` (seconds, up to two days), `energy` with optional `energyUnit` (`kcal` or `kJ`).
 
-**Dates.** ISO 8601 only: `2026-10-14T09:00:00-07:00`, `2026-10-14T09:00:00-0700`, `2026-10-14T16:00:00Z`, `2026-10-14 09:00:00`, or `2026-10-14`. With an offset, the written calendar day is the stored day. With `Z`, the day comes from `HEALTH_TIMEZONE`. With no offset, the time is read in `HEALTH_TIMEZONE` (not the server's own zone), so set `HEALTH_TIMEZONE` to the phone's zone. Locale text such as `Oct 14, 2026 at 9:00 AM` or `14/10/2026` is rejected. In the Shortcuts app, use **Format Date** with **Date Format** set to **ISO 8601**.
+**Dates.** ISO 8601 only: `2026-10-14T09:00:00-07:00`, `2026-10-14T09:00:00-0700`, `2026-10-14T16:00:00Z`, `2026-10-14 09:00:00`, or `2026-10-14`. With an offset, the written calendar day is the stored day. With `Z`, the day comes from `HEALTH_TIMEZONE`. With no offset, the time is read in `HEALTH_TIMEZONE` (not the server's own zone), so set `HEALTH_TIMEZONE` to the phone's zone. A local time that does not exist because of a daylight-saving jump (for example `2026-03-08T02:30:00` in `America/Los_Angeles`) is rejected with `400`. Locale text such as `Oct 14, 2026 at 9:00 AM` or `14/10/2026` is rejected. In the Shortcuts app, use **Format Date** with **Date Format** set to **ISO 8601**.
 
 **Midnight.** A sample that crosses midnight (for example 23:50 to 00:10) counts entirely on its **start** day. Daily mode avoids this as far as Health's grouping does.
 
@@ -70,7 +72,7 @@ The body is an object with a `samples` array, a `workouts` array, or both. Daily
 
 Recommended: the header `Authorization: Bearer <HEALTH_INGEST_TOKEN>` on `https://<your-host>/ingest/shortcuts`. **Get Contents of URL** can set headers, so this works in the Shortcuts app.
 
-> **The Bearer header is required for exact daily totals.** Only a request with the header replaces a stored day. A request authenticated with the URL token can add a day that has no data yet, and can update a day that earlier URL-token requests wrote, but it **cannot correct or lower** a day written any other way (with the header, by another app, or by an import). This keeps a leaked URL token from overwriting your data.
+> **The Bearer header is required for exact daily totals.** Only a request with the header replaces a stored day. A request authenticated with the URL token can add a day that has no data yet, and can update a day that earlier URL-token requests wrote, but it **cannot correct or lower** a day written any other way (with the header, by another app, or by an import). Workouts sent with the URL token are insert-only: a new workout is added, but an existing one (same type and start) is never changed. This keeps a leaked URL token from overwriting your data.
 
 Secondary, only if you prefer not to use a header: the write-only `HEALTH_INGEST_URL_TOKEN` in the path, `https://<your-host>/ingest/shortcuts/<HEALTH_INGEST_URL_TOKEN>`, with no `Authorization` header. A `?token=<HEALTH_INGEST_URL_TOKEN>` query also works, but prefer the path, and prefer the header over both. The same rules as HC Webhook and Life Dashboard Companion apply: the value must match `^[A-Za-z0-9_-]{32,}$`, must differ from `HEALTH_INGEST_TOKEN`, only authenticates `POST` to these ingest routes, and is off when unset. A token in a URL can leak through logs and screenshots; see [Security](security.md). A shortcut you share includes its URL and headers, so never share yours.
 
