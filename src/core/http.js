@@ -7,6 +7,7 @@ import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
 import { DEFAULT_TIME_ZONE, MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "./metrics.js";
 import { localDate, parse, payloadError } from "./parse.js";
+import { parseShortcuts, shortcutsError } from "./shortcuts.js";
 import { parseSyncFit, syncFitError } from "./syncfit.js";
 
 export function json(body, status = 200) {
@@ -19,6 +20,7 @@ export function json(body, status = 200) {
 function ingestKind(pathname) {
   if (pathname === "/ingest/hc-webhook" || /^\/ingest\/hc-webhook\/[^/]+$/.test(pathname)) return "hc-webhook";
   if (pathname === "/ingest/life-dashboard" || /^\/ingest\/life-dashboard\/[^/]+$/.test(pathname)) return "life-dashboard";
+  if (pathname === "/ingest/shortcuts" || /^\/ingest\/shortcuts\/[^/]+$/.test(pathname)) return "shortcuts";
   return null;
 }
 
@@ -52,6 +54,7 @@ export async function handleRequest(req, ctx) {
   if (url.pathname === "/ingest/syncfit" && req.method === "POST") return ingestSyncFit(req, ctx);
   if (ingestKind(url.pathname) === "hc-webhook" && req.method === "POST") return ingestHcWebhook(req, ctx);
   if (ingestKind(url.pathname) === "life-dashboard" && req.method === "POST") return ingestLifeDashboard(req, ctx);
+  if (ingestKind(url.pathname) === "shortcuts" && req.method === "POST") return ingestShortcuts(req, ctx);
   if (url.pathname === "/summary" && req.method === "GET") return summary(url, ctx.storage);
   if (url.pathname === "/mcp") return handleMcp(req, ctx);
   return json({ error: "not_found" }, 404);
@@ -204,6 +207,20 @@ async function ingestSyncFit(req, ctx) {
   }
   if (syncFitError(body)) return json({ error: "invalid_payload" }, 400);
   return storeParsed(ctx, parseSyncFit(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
+}
+
+async function ingestShortcuts(req, ctx) {
+  const text = await req.text();
+  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  const options = adapterOptions(ctx);
+  if (shortcutsError(body, options)) return json({ error: "invalid_payload" }, 400);
+  return storeParsed(ctx, parseShortcuts(body, options), text);
 }
 
 async function storeParsed(ctx, parsed, text) {
