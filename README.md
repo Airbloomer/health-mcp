@@ -1,6 +1,6 @@
-# apple-health-mcp: a self-hosted Apple Health data endpoint
+# health-mcp
 
-Receives Apple Health data and serves daily summaries. `POST /ingest` accepts the [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api) JSON format (export version 2) and the other sources in Works with. `GET /summary` returns one calendar day's totals.
+A self-hosted health data endpoint. It works with data exported from Apple Health and serves daily summaries. `POST /ingest` accepts the [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api) JSON format (export version 2) and the other sources in Works with. `GET /summary` returns one calendar day's totals.
 
 The parsing, aggregation, auth, HTTP handling, and read-only MCP endpoint live in `src/core` and depend only on web standards (`Request`, `Response`, `fetch`, `crypto`, `Intl`). Persistence is a small storage interface. Two adapters implement it:
 
@@ -8,6 +8,14 @@ The parsing, aggregation, auth, HTTP handling, and read-only MCP endpoint live i
 - **Node.js** (`src/adapters/node.js`) with SQLite via [better-sqlite3](https://github.com/WiseLibs/better-sqlite3), or Postgres when `DATABASE_URL` is a `postgres://` URL
 
 `migrations/` is plain SQL that runs on SQLite, D1, and Postgres. The repo ships synthetic fixtures only. Do not commit tokens, `wrangler.toml`, or exports of real health data.
+
+## Disclaimer
+
+Not affiliated with, endorsed or sponsored by Apple Inc. Apple, Apple Health and HealthKit are trademarks of Apple Inc. Health Auto Export, SyncFit, Health Export Pro, Google, Health Connect, HC Webhook and Life Dashboard Companion are trademarks of their respective owners and are mentioned only to describe compatibility; no endorsement is implied.
+
+Not medical advice and not a medical device. This software is for personal informational use only and is not intended to diagnose, treat or prevent any condition. Consult a qualified professional for medical decisions.
+
+Self-hosted: you run this software and you are responsible for securing your endpoint and your health data. Airbloomer, LLC does not host, receive or access any user data. Provided 'as is' under the MIT License, without warranty.
 
 ## API
 
@@ -44,7 +52,7 @@ The body is the Health Auto Export JSON format. Health Auto Export can post it, 
 
 Before anything is written, the core aggregates that payload in memory to **one row per (metric, date)**: `sum_qty`, `last_qty`, `last_ts`, `units`, and `n` (sample count). Only the summary metrics are kept, plus any names in `HEALTH_METRIC_ALLOWLIST`. The upsert replaces the existing row for that date and metric only when the new `n` is greater than or equal to the stored `n` (`WHERE excluded.n >= points_daily.n`). It does not add to the previous total, so posting the same samples again cannot double-count. A shorter re-send is ignored, so a partial day cannot wipe a fuller total. Health Auto Export should send whole days: the request must contain every sample that should remain for each metric-day it includes. A later export with at least as many samples replaces the row. Other metrics on that date are left alone. Workouts stay one row per `(name, start)`.
 
-The raw JSON is one `raw_payloads` row per request. Set `HEALTH_STORE_RAW=false` to skip it. A body larger than about 1.5MB is also skipped, so the row stays under D1's 2MB limit. Metrics in that body are still ingested.
+The raw JSON is one `raw_payloads` row per request only when `HEALTH_STORE_RAW` is enabled. It defaults to off. Set `HEALTH_STORE_RAW=true` (or `1`, `yes`, or `on`) to keep the body. A body larger than about 1.5MB is skipped even then, so the row stays under D1's 2MB limit. Metrics in that body are still ingested.
 
 There is no secondary index on the daily table. The primary key is `(date, metric)`, which is enough for `GET /summary` and avoids a second write per row. A 7-day export of the summary metrics is a few dozen row writes, not one write per sample.
 
@@ -74,9 +82,9 @@ Timestamps that include a numeric offset (`2026-10-14 17:30:00 -0700`) use the c
 
 `/summary` adds `sum_qty` for summed metrics and reads `last_qty` for weight and body fat. Send each real quantity once inside a request (one daily total, or non-overlapping buckets). Health Auto Export should send whole days. A later request with fewer samples for that metric-day is ignored, so splitting one day across batch requests leaves the stored total at whichever request had the larger sample count.
 
-### Apple Health export
+### Export from Apple Health
 
-The Health app's Export All Health Data file is a supported source. `POST /ingest` accepts `export.xml` when the body fits in the 20,000,000 byte ingest limit, and a zip of that export when the zip fits too. Anything that starts with `<` or a zip local-file header is read as this format. Health Auto Export JSON still starts with `{` and is unchanged.
+Data exported from Apple Health is a supported source. The Health app writes that export as `export.xml`. `POST /ingest` accepts `export.xml` when the body fits in the 20,000,000 byte ingest limit, and a zip of that export when the zip fits too. Anything that starts with `<` or a zip local-file header is read as this format. Health Auto Export JSON still starts with `{` and is unchanged.
 
 The large streaming import is Node-only. `POST /import/apple-health` on the Node server reads `export.xml`, or a zip whose entry is named `export.xml`, up to 2,000,000,000 compressed bytes, without buffering the file at the 20 MB ingest limit. A Worker cannot take that stream: platform body, memory, and CPU limits are much smaller. On Cloudflare, run `node src/cli/import-apple-health.js` with `--chunk-url` pointed at the Worker. The zip entry must store its sizes in the local header (no data descriptor) and use stored or deflate compression. Zip64 is rejected. Decompressed XML is capped at 10 GB, and a ratio above 200:1 after 100 MB of output is rejected with `413`.
 
@@ -89,19 +97,19 @@ Records are aggregated while streaming, one running total per metric, day, and `
 
 Days on or after the export's `<ExportDate value="…">` are dropped. That calendar day is still in progress in the Health app, so the file only has a partial total, and the `n` from a full import is much larger than a later Health Auto Export day. Leaving the partial day out lets Health Auto Export fill it. Earlier imported days keep their record-count `n`, so they stay in place unless a later upload for that metric-day has at least as many samples. An import therefore takes precedence over a coarser Health Auto Export update for those completed days.
 
-Apple's `<!DOCTYPE HealthData [ <!ELEMENT …> <!ATTLIST …> ]>` header is accepted. A DOCTYPE that uses `SYSTEM`, `PUBLIC`, or `<!ENTITY` is rejected. Comments, `CDATA` sections, and the DOCTYPE subset are not scanned for records.
+A `<!DOCTYPE HealthData [ <!ELEMENT …> <!ATTLIST …> ]>` header from an export of Apple Health is accepted. A DOCTYPE that uses `SYSTEM`, `PUBLIC`, or `<!ENTITY` is rejected. Comments, `CDATA` sections, and the DOCTYPE subset are not scanned for records.
 
 ### Health Export Pro
 
-Health Export Pro's published JSON is accepted on `POST /ingest` and on `POST /ingest/health-export-pro`. Detection on `/ingest` runs after the Apple export sniff and requires `exportDate`, `startDate`, `endDate`, `syncSource`, and a `data` object that is not a Health Auto Export `metrics` array. A Health Auto Export body is still parsed as Health Auto Export, including when those extra fields are also present and `data.metrics` is an array.
+Health Export Pro's published JSON is accepted on `POST /ingest` and on `POST /ingest/health-export-pro`. Detection on `/ingest` runs after the check for an export from Apple Health and requires `exportDate`, `startDate`, `endDate`, `syncSource`, and a `data` object that is not a Health Auto Export `metrics` array. A Health Auto Export body is still parsed as Health Auto Export, including when those extra fields are also present and `data.metrics` is an array.
 
-`data` is keyed by HealthKit identifier. Quantity samples (`uuid`, `value`, `unit`, `startDate`, `endDate`) use the same metric names as an Apple Health export. `data.workouts` uses `workoutActivityType` (the HealthKit integer), `durationSeconds`, and `totalEnergyBurned` in kcal. `37` is Running, `50` is Traditional Strength Training, and `52` is Walking. Medication sections and `workoutRoutes` are ignored. The same daily upsert applies, so each request should contain the whole day for every metric it includes. This adapter follows the published document shape; it has not been verified against a live app session.
+`data` is keyed by HealthKit identifier. Quantity samples (`uuid`, `value`, `unit`, `startDate`, `endDate`) use the same metric names as an export from Apple Health. `data.workouts` uses `workoutActivityType` (the HealthKit integer), `durationSeconds`, and `totalEnergyBurned` in kcal. `37` is Running, `50` is Traditional Strength Training, and `52` is Walking. Medication sections and `workoutRoutes` are ignored. The same daily upsert applies, so each request should contain the whole day for every metric it includes. This adapter follows the published document shape; it has not been verified against a live app session.
 
 ### SyncFit
 
 SyncFit's native JSON is accepted on `POST /ingest` and `POST /ingest/syncfit`. The body is `{ "schemaVersion": 1, "samples": [] }` with no `data` object. Each sample has `metric`, `start`, `value`, and `unit`. Timestamps are ISO 8601; an offset keeps the calendar date in the string. `basal_energy` is stored as `basal_energy_burned`, `body_mass` as `weight_body_mass`, and dietary identifiers map onto the summary metrics (`dietary_energy` or `dietary_energy_consumed`, `dietary_protein`, `dietary_carbohydrates`, `dietary_fat_total`). Other snake_case metrics are stored only when `HEALTH_METRIC_ALLOWLIST` names them.
 
-On `POST /ingest` the order is Apple export XML or zip, then Health Export Pro, then SyncFit, then Health Auto Export. SyncFit is used only when `data` is absent. A Health Auto Export body that also carries `schemaVersion` and `samples` stays Health Auto Export.
+On `POST /ingest` the order is XML or a zip exported from Apple Health, then Health Export Pro, then SyncFit, then Health Auto Export. SyncFit is used only when `data` is absent. A Health Auto Export body that also carries `schemaVersion` and `samples` stays Health Auto Export.
 
 A `workout` sample uses `value` as duration in seconds and `details.activityType` as the HealthKit activity integer (`37` Running, `50` Traditional Strength Training, `52` Walking). `details.totalEnergy` is kcal. Routes and other detail payloads are ignored.
 
@@ -152,7 +160,7 @@ curl -sS \
 
 ## MCP
 
-`POST /mcp` is a read-only [Model Context Protocol](https://modelcontextprotocol.io) endpoint using Streamable HTTP. It uses the same bearer token as the rest of the API. The server name is `apple-health-mcp`, and a rejected token returns `WWW-Authenticate: Bearer realm="apple-health-mcp"`. The server is stateless: it does not issue a session id, and each request stands alone. A response is one JSON-RPC object (`application/json`). A client that accepts only `text/event-stream` gets that object as a single SSE `message` event. `GET` and `DELETE` return `405`. An `initialize` request for an unsupported protocol version is answered with `2025-06-18`.
+`POST /mcp` is a read-only [Model Context Protocol](https://modelcontextprotocol.io) endpoint using Streamable HTTP. It uses the same bearer token as the rest of the API. The server name is `health-mcp`, and a rejected token returns `WWW-Authenticate: Bearer realm="health-mcp"`. The server is stateless: it does not issue a session id, and each request stands alone. A response is one JSON-RPC object (`application/json`). A client that accepts only `text/event-stream` gets that object as a single SSE `message` event. `GET` and `DELETE` return `405`. An `initialize` request for an unsupported protocol version is answered with `2025-06-18`.
 
 There are no write tools. A client cannot ingest, edit, or delete data through MCP.
 
@@ -191,7 +199,7 @@ Add a remote MCP server in Cursor settings, or in `mcp.json`:
 ```json
 {
   "mcpServers": {
-    "apple-health-mcp": {
+    "health-mcp": {
       "url": "https://<your-host>/mcp",
       "headers": {
         "Authorization": "Bearer <HEALTH_INGEST_TOKEN>"
@@ -214,14 +222,36 @@ Other Streamable HTTP clients use the same URL and header. Point the host at whe
 | `SQLITE_PATH` | no | Node | SQLite file when `DATABASE_URL` is unset. Default `./data/health.sqlite`. The image sets `/data/health.sqlite`. |
 | `PORT` | no | Node | Default `8787`. |
 | `HOST` | no | Node | Default `0.0.0.0`. |
-| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store each request body in `raw_payloads`. Default on. Set `false`, `0`, `no`, or `off` to skip it. Bodies over about 1.5MB are skipped either way, under D1's 2MB row limit. |
+| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store each request body in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. `false`, `0`, `no`, and `off` leave it off. Bodies over about 1.5MB are skipped either way, under D1's 2MB row limit. |
 | `HEALTH_METRIC_ALLOWLIST` | no | Wrangler `[vars]`, or the process environment | Comma-separated metric names to store in addition to the summary set. |
-| `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated Apple Health `sourceName` values. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
+| `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated `sourceName` values from an export of Apple Health. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
 | `MCP_ALLOWED_ORIGINS` | no | Wrangler `[vars]`, or the process environment | Comma-separated `Origin` values allowed to call `/mcp`. Empty by default, which rejects every request that sends `Origin`. Requests with no `Origin` header stay allowed. |
 
 Copy [`.env.example`](.env.example) to `.env` for Node, or [`dev.vars.example`](dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
 On Cloudflare, set the token with `npx wrangler secret put HEALTH_INGEST_TOKEN`. Put `HEALTH_TIMEZONE` in `[vars]` if you do not want `UTC`. The example file sets it to `America/Los_Angeles`; the code still defaults to `UTC` when the variable is absent. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` (gitignored) and replace `database_id`. Set `account_id` in that local file only if Wrangler should target an account other than the one you are logged in to. Do not commit either value, and do not commit a custom hostname.
+
+## Security
+
+`HEALTH_INGEST_TOKEN` is the only protection. `/ingest`, the import routes, `/summary`, and `/mcp` accept any client that sends that bearer token. There is no user account, network allowlist, or second check. An empty token rejects every request. Anyone who has the token can read and write the health data this endpoint stores.
+
+Use at least 32 random bytes. This prints 32 bytes as hex:
+
+```bash
+openssl rand -hex 32
+```
+
+Put that value in `HEALTH_INGEST_TOKEN` (a Worker secret, or the process environment for Node and Docker). Do not commit it.
+
+Prefer the `HEALTH_INGEST_TOKEN` environment variable over the CLI `--token` flag. The import command reads the environment variable when `--token` is omitted. A value passed as `--token` is visible to other users on the machine, in the process list and often in shell history.
+
+To rotate the token, generate a new value with `openssl rand -hex 32` and replace `HEALTH_INGEST_TOKEN`. On Cloudflare, run `npx wrangler secret put HEALTH_INGEST_TOKEN`. On Node or Docker, update the environment and restart the process. Then update every client that sends `Authorization: Bearer …` (automations, shortcuts, and MCP clients). The previous token stops working as soon as the running server is using the new value. There is no overlap between the two.
+
+`workers_dev = true` in [`wrangler.example.toml`](wrangler.example.toml) exposes a public `workers.dev` URL. Anyone who learns that hostname and has the token can call the API. Set `workers_dev = false` in your local `wrangler.toml` when the Worker should not be reachable on `workers.dev`.
+
+Requests without an `Origin` header are allowed. Native clients call `/mcp` that way. A request that sends `Origin` is rejected with `403` unless that origin is listed in `MCP_ALLOWED_ORIGINS`.
+
+`HEALTH_STORE_RAW` defaults to off, so request bodies are not written to `raw_payloads` unless you set it to `true`, `1`, `yes`, or `on`.
 
 ## Deploy
 
@@ -233,13 +263,13 @@ Requires Node.js 22 or newer.
 npm install
 cp wrangler.example.toml wrangler.toml
 npx wrangler login
-npx wrangler d1 create apple-health-mcp
+npx wrangler d1 create health-mcp
 ```
 
 Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
 
 ```bash
-npx wrangler d1 migrations apply apple-health-mcp --remote
+npx wrangler d1 migrations apply health-mcp --remote
 printf '%s' 'replace-with-a-long-random-token' | npx wrangler secret put HEALTH_INGEST_TOKEN
 npx wrangler deploy
 ```
@@ -250,23 +280,23 @@ For local development, apply the same migrations before `wrangler dev`:
 
 ```bash
 cp dev.vars.example .dev.vars
-npx wrangler d1 migrations apply apple-health-mcp --local
+npx wrangler d1 migrations apply health-mcp --local
 npx wrangler dev
 ```
 
-To serve a hostname of your own, uncomment `[[routes]]` in the local `wrangler.toml` and set `pattern`. The Workers preview URL works without a custom domain.
+To serve a hostname of your own, uncomment `[[routes]]` in the local `wrangler.toml` and set `pattern`. The Workers preview URL works without a custom domain. `workers_dev = true` exposes a public `workers.dev` URL; see Security.
 
 If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. Health Auto Export's own timestamps include an offset, and those dates do not use this variable.
 
 ### Docker
 
 ```bash
-docker build -t apple-health-mcp .
+docker build -t health-mcp .
 docker run --rm -p 8787:8787 \
   -e HEALTH_INGEST_TOKEN=replace-with-a-long-random-token \
   -e HEALTH_TIMEZONE=UTC \
-  -v apple-health-mcp:/data \
-  apple-health-mcp
+  -v health-mcp:/data \
+  health-mcp
 ```
 
 Postgres instead of the SQLite volume:
@@ -275,7 +305,7 @@ Postgres instead of the SQLite volume:
 docker run --rm -p 8787:8787 \
   -e HEALTH_INGEST_TOKEN=replace-with-a-long-random-token \
   -e DATABASE_URL='postgres://user:password@host:5432/health' \
-  apple-health-mcp
+  health-mcp
 ```
 
 The container listens on `8787` and applies pending migrations on startup. Generate a token with `openssl rand -hex 32`.
@@ -291,21 +321,22 @@ npm start
 
 `npm start` runs `node src/adapters/node.js`, creates the SQLite directory if needed, and applies any migration that has not been recorded in `schema_migrations`. Set `DATABASE_URL` to a `postgres://` URL to use Postgres instead. The same migrations run there. `mysql://` and other schemes are rejected.
 
-Import an Apple Health export into that database with `node src/cli/import-apple-health.js export.zip`. To send it to a running server instead, pass `--chunk-url http://127.0.0.1:8787/import/apple-health/chunk` and `--token`.
+Import an export from Apple Health into that database with `node src/cli/import-apple-health.js export.zip`. To send it to a running server instead, pass `--chunk-url http://127.0.0.1:8787/import/apple-health/chunk`. Set `HEALTH_INGEST_TOKEN` in the environment rather than passing `--token`.
 
 `0002_daily_points.sql` copies existing per-sample `points` rows into `points_daily` (one row per metric and day) and leaves the old table in place. Dropping it would count as a write for every old sample, so do that later with `DROP TABLE points;` once the daily write budget has room. On Cloudflare, apply `0002` with `wrangler d1 migrations apply` before `wrangler deploy`, as in the steps above. Node and Docker apply it on startup, before the server accepts traffic.
 
 ## Works with
 
-1. **Apple Health export** (supported). The Health app's Export All Health Data file is the first supported source. Send `export.xml`, or the zip that contains it, to `POST /ingest` when it fits the ingest limit. The large stream, `POST /import/apple-health`, is Node-only. A Worker stops at about a 100 MB body, so on Cloudflare run `node src/cli/import-apple-health.js` with `--chunk-url` pointed at `POST /import/apple-health/chunk`. That chunk route takes whole days that are already one row per metric and date. The same `n` upsert applies, so a metric-day has to arrive complete in one request. An export lists every source, and adding them together would double-count steps and energy. The import keeps one source per metric-day: the largest total for summed metrics, and the newest reading for weight and body fat. `HEALTH_SOURCE_PRIORITY` is an optional comma-separated list of `sourceName` values; the first listed source that has samples that day wins instead.
+1. **Export from Apple Health** (supported). Data exported from Apple Health is the first supported source. The Health app writes it as `export.xml`. Send `export.xml`, or the zip that contains it, to `POST /ingest` when it fits the ingest limit. The large stream, `POST /import/apple-health`, is Node-only. A Worker stops at about a 100 MB body, so on Cloudflare run `node src/cli/import-apple-health.js` with `--chunk-url` pointed at `POST /import/apple-health/chunk`. That chunk route takes whole days that are already one row per metric and date. The same `n` upsert applies, so a metric-day has to arrive complete in one request. An export lists every source, and adding them together would double-count steps and energy. The import keeps one source per metric-day: the largest total for summed metrics, and the newest reading for weight and body fat. `HEALTH_SOURCE_PRIORITY` is an optional comma-separated list of `sourceName` values; the first listed source that has samples that day wins instead.
 2. **Health Auto Export** (supported). REST JSON, export version 2, posted to `POST /ingest`. The shape is documented above, and the iOS setup is below. Any other client that sends that same shape can use this path too.
 3. **SyncFit** (native format supported). A body with `schemaVersion` 1 and a `samples` array, and no `data` object, is accepted on `POST /ingest` and `POST /ingest/syncfit`. `basal_energy` is stored as `basal_energy_burned`, `body_mass` as `weight_body_mass`, and dietary sample names map onto the summary metrics. A `workout` sample's `value` is duration in seconds, and `details.activityType` is the HealthKit activity integer. The Health Auto Export preview layout is untested.
-4. **Health Export Pro** (published payload supported, live app untested). A body with `exportDate`, `startDate`, `endDate`, `syncSource`, and `data` keyed by HealthKit type is accepted on `POST /ingest` and `POST /ingest/health-export-pro`. Quantity samples use the same metric names as an Apple Health export. Workout `workoutActivityType` is the HealthKit integer. Medication sections and workout routes are ignored.
+4. **Health Export Pro** (published payload supported, live app untested). A body with `exportDate`, `startDate`, `endDate`, `syncSource`, and `data` keyed by HealthKit type is accepted on `POST /ingest` and `POST /ingest/health-export-pro`. Quantity samples use the same metric names as an export from Apple Health. Workout `workoutActivityType` is the HealthKit integer. Medication sections and workout routes are ignored.
 5. **iOS Shortcuts** (untested). Build the Health Auto Export JSON shape and POST it to `/ingest`. One recipe: Find Health Samples for a metric you store, put each sample's date and quantity into `data.metrics[].data` as `{ "date", "qty" }` with `name` and `units`, then Get Contents of URL with method POST, the header `Authorization` set to `Bearer <HEALTH_INGEST_TOKEN>`, and that JSON as the body. Health samples cannot be read while the phone is locked, so the shortcut has to run while the device is unlocked. This recipe has not been run against this server.
+6. **Android (planned)**. HC Webhook and Life Dashboard Companion adapters are coming.
 
 ## Health Auto Export
 
-Install Health Auto Export on iOS and create **two** REST API automations that post to the same URL. The app allows one data type per automation. Official reference: [Sync Apple Health Data to REST API](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api).
+Install Health Auto Export on iOS and create **two** REST API automations that post to the same URL. The app allows one data type per automation. Official reference: [Health Auto Export REST API automations](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api).
 
 1. Open the sidebar, tap **Automations**, then **New Automation**, and choose **REST API**.
 2. URL: `https://<your-host>/ingest` (for a local server, an address the phone can reach, such as `http://192.168.1.10:8787/ingest`).

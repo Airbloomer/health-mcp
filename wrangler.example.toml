@@ -1,8 +1,9 @@
 # Copy to wrangler.toml and fill in the local values.
 # wrangler.toml is gitignored. Do not commit account ids, database ids, or hostnames.
-name = "apple-health-mcp"
+name = "health-mcp"
 main = "src/index.js"
 compatibility_date = "2026-09-22"
+# true exposes a public workers.dev URL for this Worker. Set false to avoid that hostname.
 workers_dev = true
 preview_urls = false
 
@@ -13,6 +14,7 @@ preview_urls = false
 # IANA zone for timestamps that do not include a numeric offset.
 # Health Auto Export's own timestamps include an offset and do not use this.
 HEALTH_TIMEZONE = "America/Los_Angeles"
+# Off by default. Set to "true", "1", "yes", or "on" to store each request body.
 # HEALTH_STORE_RAW = "true"
 # HEALTH_METRIC_ALLOWLIST = "heart_rate,resting_heart_rate"
 # Comma-separated Origin values allowed to call /mcp. Empty rejects every request that sends Origin.
@@ -20,7 +22,7 @@ HEALTH_TIMEZONE = "America/Los_Angeles"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "apple-health-mcp"
+database_name = "health-mcp"
 database_id = "replace-with-d1-database-id"
 migrations_dir = "migrations"
 

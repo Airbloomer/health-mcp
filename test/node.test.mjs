@@ -45,7 +45,7 @@ test("daily migration rolls per-sample rows into one row per metric and day", ()
 });
 
 test("node sqlite adapter serves ingest and summary over HTTP", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "apple-health-mcp-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-mcp-"));
   const storage = await createNodeStorage({ SQLITE_PATH: path.join(dir, "nested", "health.sqlite") });
   const server = await startServer({ storage, token: "tok", timeZone: "UTC", port: 0, host: "127.0.0.1" });
   const { port } = server.address();
@@ -215,6 +215,7 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
     receivedAt: "2026-10-16T00:00:00.000Z",
     bytes: 2,
     payload: "{}",
+    storeRaw: true,
     points: [{
       date: summaryDate,
       metric: "step_count",

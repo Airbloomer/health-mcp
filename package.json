@@ -1,11 +1,10 @@
 {
-  "name": "apple-health-mcp",
+  "name": "@airbloomer/health-mcp",
   "version": "0.1.0",
-  "description": "Receives Apple Health data from the Health Auto Export iOS app and serves daily summaries.",
+  "description": "Self-hosted health data endpoint. Works with data exported from Apple Health and serves daily summaries.",
   "keywords": [
-    "Apple Health",
+    "health-data",
     "health-auto-export",
-    "healthkit",
     "mcp",
     "self-hosted"
   ],

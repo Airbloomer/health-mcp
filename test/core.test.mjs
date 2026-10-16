@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { test } from "node:test";
-import { aggregateDays, shouldStoreRaw, storedMetricSet } from "../src/core/aggregate.js";
+import { aggregateDays, rawStorageEnabled, shouldStoreRaw, storedMetricSet } from "../src/core/aggregate.js";
 import { authed } from "../src/core/auth.js";
 import { handleRequest } from "../src/core/http.js";
 import { MemoryStorage } from "../src/core/memory.js";
@@ -133,7 +133,7 @@ test("memory storage serves the ingest and summary API", async () => {
   assert.equal(ingestBody.points, 11);
   assert.equal(ingestBody.workouts, 1);
   assert.match(ingestBody.id, /^2026-10-14\//);
-  assert.equal(storage.payloads.length, 1);
+  assert.equal(storage.payloads.length, 0);
 
   const summarized = await handleRequest(request(`/summary?date=${summaryDate}`), ctx);
   assert.equal(summarized.headers.get("cache-control"), "no-store");
@@ -159,6 +159,58 @@ test("memory storage serves the ingest and summary API", async () => {
   const retried = await (await handleRequest(request(`/summary?date=${summaryDate}`), ctx)).json();
   assert.deepEqual(retried, expectedSummary);
   assert.equal(storage.points.size, Object.keys(SUM_METRICS).length + Object.keys(LATEST_METRICS).length);
+});
+
+test("HEALTH_STORE_RAW defaults to off", async () => {
+  assert.equal(rawStorageEnabled(undefined), false);
+  assert.equal(rawStorageEnabled(null), false);
+  assert.equal(rawStorageEnabled(""), false);
+  assert.equal(rawStorageEnabled("  "), false);
+  assert.equal(rawStorageEnabled(false), false);
+  assert.equal(rawStorageEnabled("false"), false);
+  assert.equal(rawStorageEnabled("0"), false);
+  assert.equal(rawStorageEnabled("no"), false);
+  assert.equal(rawStorageEnabled("off"), false);
+  assert.equal(rawStorageEnabled("maybe"), false);
+  assert.equal(rawStorageEnabled(true), true);
+  assert.equal(rawStorageEnabled("true"), true);
+  assert.equal(rawStorageEnabled("TRUE"), true);
+  assert.equal(rawStorageEnabled("1"), true);
+  assert.equal(rawStorageEnabled("yes"), true);
+  assert.equal(rawStorageEnabled("on"), true);
+
+  const small = "x".repeat(32);
+  assert.equal(shouldStoreRaw({ payload: small }), false);
+  assert.equal(shouldStoreRaw({ storeRaw: "", payload: small }), false);
+  assert.equal(shouldStoreRaw({ storeRaw: "true", payload: small }), true);
+
+  const body = JSON.stringify({
+    data: {
+      metrics: [
+        { name: "step_count", units: "count", data: [{ date: "2026-10-14 09:00:00 -0700", qty: 42 }] },
+      ],
+    },
+  });
+  const off = new MemoryStorage();
+  const skipped = await handleRequest(request("/ingest", { method: "POST", body }), {
+    token: "tok",
+    storage: off,
+    now: new Date("2026-10-16T12:00:00Z"),
+  });
+  assert.equal(skipped.status, 200);
+  assert.equal(off.payloads.length, 0);
+  assert.equal((await (await handleRequest(request("/summary?date=2026-10-14"), { token: "tok", storage: off })).json()).steps, 42);
+
+  const on = new MemoryStorage();
+  const stored = await handleRequest(request("/ingest", { method: "POST", body }), {
+    token: "tok",
+    storage: on,
+    storeRaw: "true",
+    now: new Date("2026-10-16T12:00:00Z"),
+  });
+  assert.equal(stored.status, 200);
+  assert.equal(on.payloads.length, 1);
+  assert.equal(on.payloads[0].payload, body);
 });
 
 test("allowlist stores extra metrics and raw storage can be turned off", async () => {

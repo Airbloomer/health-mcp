@@ -14,7 +14,7 @@ export const MAX_TOOL_RESULTS = 500;
 /** MCP request bodies above this are rejected. */
 export const MAX_MCP_BYTES = 64 * 1024;
 
-export const MCP_SERVER_NAME = "apple-health-mcp";
+export const MCP_SERVER_NAME = "health-mcp";
 
 const SUPPORTED = new Set(MCP_PROTOCOL_VERSIONS);
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -30,7 +30,7 @@ const READ_ONLY = {
 export const MCP_TOOLS = [
   {
     name: "get_daily_summary",
-    description: "Daily Apple Health summary for one calendar day: dietary and active calories, macros, steps, weight, body fat, and workouts. Same object as GET /summary.",
+    description: "Daily summary for one calendar day of data exported from Apple Health: dietary and active calories, macros, steps, weight, body fat, and workouts. Same object as GET /summary.",
     inputSchema: {
       type: "object",
       properties: {
@@ -197,7 +197,7 @@ function initializeResult(params) {
     protocolVersion: SUPPORTED.has(requested) ? requested : MCP_PROTOCOL_VERSION,
     capabilities: { tools: { listChanged: false } },
     serverInfo: { name: MCP_SERVER_NAME, version: "0.1.0" },
-    instructions: "Read-only Apple Health data. Dates are calendar days in YYYY-MM-DD. This server has no write tools.",
+    instructions: "Read-only health data. Dates are calendar days in YYYY-MM-DD. This server has no write tools.",
   };
 }
 

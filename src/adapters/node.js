@@ -162,7 +162,7 @@ if (isMainModule()) {
   });
   const address = server.address();
   const shown = address && typeof address === "object" ? `${address.address}:${address.port}` : String(port);
-  console.log(`apple-health-mcp listening on ${shown}`);
+  console.log(`health-mcp listening on ${shown}`);
 
   const shutdown = () => {
     server.close(() => {
