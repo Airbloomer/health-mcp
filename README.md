@@ -168,6 +168,7 @@ Start a new chat with the connector turned on and ask:
 - "How did I train this week?"
 - "How many steps did I take yesterday?"
 - "How did I sleep this week?" (Android, with sleep enabled)
+- "Show my weight over the last 30 days."
 
 Your data appears only after the phone app's first sync. The sleep question works only on Android, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
 
