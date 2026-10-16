@@ -7,7 +7,7 @@ import { handleRequest } from "../core/http.js";
 import { limitsFor, OTHER_MAX_BYTES, resolveLimitsProfile } from "../core/limits.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES } from "../core/metrics.js";
-import { isRemovedIngestPath, matchRoute } from "../core/routes.js";
+import { matchRoute } from "../core/routes.js";
 import { openPostgres } from "./postgres.js";
 import { createSqliteStorage } from "./sqlite.js";
 
@@ -132,11 +132,6 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
   const server = http.createServer(async (req, res) => {
     try {
       const pathname = requestPath(req);
-      if (isRemovedIngestPath(pathname)) {
-        console.error(redactRequestTarget(`${req.method || ""} ${req.url || ""}`, token, urlToken));
-        writeJsonAndClose(req, res, 410, { error: "gone" });
-        return;
-      }
       let request;
       const route = matchRoute(req.method, pathname);
       if (route?.guard === "apple-stream") {

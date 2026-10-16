@@ -14,9 +14,14 @@ function num(value) {
 
 /**
  * Winner for one exact (name, canonical start) group.
- * Already-canonical start, then longest duration, then highest kcal, then smallest start string.
+ * Non-URL writers (bearer and legacy NULL) rank ahead of `url`, then an
+ * already-canonical start, then longest duration, then highest kcal, then the
+ * smallest start string. A URL-token row never wins over a trusted row.
  */
 export function compareMigrationWinner(a, b) {
+  const aUrl = a.writer === "url" ? 1 : 0;
+  const bUrl = b.writer === "url" ? 1 : 0;
+  if (aUrl !== bUrl) return aUrl - bUrl;
   const aCanon = String(a.start) === a.canonical ? 0 : 1;
   const bCanon = String(b.start) === b.canonical ? 0 : 1;
   if (aCanon !== bCanon) return aCanon - bCanon;
@@ -56,8 +61,13 @@ export function planWorkoutStarts(rows, timeZone = DEFAULT_TIME_ZONE) {
   for (const members of groups.values()) {
     const ranked = [...members].sort(compareMigrationWinner);
     const winner = ranked[0];
+    const deletes = [];
+    for (const row of ranked.slice(1)) {
+      if (winner.writer === "url" && row.writer !== "url") continue;
+      deletes.push({ name: row.name, start: row.start });
+    }
     actions.push({
-      deletes: ranked.slice(1).map((row) => ({ name: row.name, start: row.start })),
+      deletes,
       update: String(winner.start) === winner.canonical
         ? null
         : { name: winner.name, start: winner.start, next: winner.canonical },

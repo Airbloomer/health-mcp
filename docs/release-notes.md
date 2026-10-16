@@ -16,12 +16,12 @@ New request limits depend on that profile. The free profile accepts 40 workouts,
 
 HC Webhook history that cannot be split should be sent with Manual Sync, Custom selection, one day at a time. Do not use Past 7 Days or Past 30 Days. Shortcuts should send one local day per request. Catch-up loops oldest first and stops at the first non-2xx.
 
-Workout `start` values are stored as UTC. The `writer` column is `bearer`, `url`, or NULL for an older row. Matching uses a type map (`traditional_strength_training` and `functional_strength_training` match `strength_training`; treadmill running matches running). Stored names are not rewritten. `isIndoor` is not part of the match. Paused runs whose elapsed time and end-minus-start differ by more than the duration tolerance are not merged.
+Workout `start` values are stored as UTC. The `writer` column is `bearer`, `url`, or NULL for an older row. A URL-token row written before that column existed has `writer` NULL, and read-time de-duplication counts that NULL writer as trusted, the same as a bearer row. `npm run migrate:workout-starts` ranks a bearer or NULL writer ahead of `url` and does not delete the trusted row in order to keep the URL-token row. Matching uses a type map (`traditional_strength_training` and `functional_strength_training` match `strength_training`; treadmill running matches running). Stored names are not rewritten. `isIndoor` is not part of the match. Paused runs whose elapsed time and end-minus-start differ by more than the duration tolerance are not merged.
 
 `HEALTH_STORE_RAW` still defaults to off. When it is on, the raw row is the post-filter JSON `{route, points, workouts}` of rows that were stored, not the original body. Sensitive metrics are stored only when `HEALTH_METRIC_ALLOWLIST` names them exactly.
 
 A URL credential writes points with `n` 0. A later partial URL batch can overwrite a fuller URL day. It cannot overwrite a Bearer day.
 
-Removed ingest paths return `410 {"error":"gone"}` and the access log redacts the token segment.
+Removed ingest paths return `401` until a valid bearer token is present, then `410 {"error":"gone"}`. The access log redacts the token segment.
 
 On the node profile a large request can commit more than one database batch. Retry with Bearer, which is idempotent. An `1102` response means the batch should be split and retried.

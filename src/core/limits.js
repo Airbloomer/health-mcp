@@ -71,9 +71,36 @@ export function secondsUntilUtcMidnight(now = new Date()) {
   return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }
 
+/**
+ * D1 daily row limits, matched as documented text rather than keywords.
+ * Debug D1, List of D1_ERRORs:
+ * https://developers.cloudflare.com/d1/observability/debug-d1/
+ * The same sentences, without the trailing "See https://..." line, are in
+ * https://developers.cloudflare.com/changelog/post/2026-09-01-d1-free-tier-limit-enforcement/
+ * Both reset at midnight UTC. Debug D1 may append
+ * " See https://developers.cloudflare.com/d1/platform/limits/ for more details."
+ */
+export const D1_DAILY_ROW_WRITE_LIMIT =
+  "Your account has exceeded D1's free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
+export const D1_DAILY_ROW_READ_LIMIT =
+  "Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
+
+const D1_DAILY_LIMIT_MESSAGES = [D1_DAILY_ROW_WRITE_LIMIT, D1_DAILY_ROW_READ_LIMIT];
+
+function errorText(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current === "string") parts.push(current);
+    else if (current.message) parts.push(String(current.message));
+    current = current.cause;
+  }
+  return parts.join("\n");
+}
+
 export function isDailyWriteLimitError(error) {
-  const text = `${error?.message || ""} ${error?.cause?.message || ""}`;
-  return /daily/i.test(text) && /(limit|quota|exceed)/i.test(text);
+  const text = errorText(error);
+  return D1_DAILY_LIMIT_MESSAGES.some((message) => text.includes(message));
 }
 
 export function isMissingWriterError(error) {

@@ -1,6 +1,6 @@
 import { aggregateDays, shouldStoreRaw, storedMetricSet, utf8Bytes } from "./aggregate.js";
 import { appleChunkError, parseAppleExport } from "./apple-export.js";
-import { tokenClass } from "./auth.js";
+import { redactRequestTarget, tokenClass } from "./auth.js";
 import { assertTimeZone } from "./datetime.js";
 import { hcWebhookError, parseHcWebhook } from "./hc-webhook.js";
 import { canonicalStart, realCalendarDate, workoutLocalDate } from "./health-connect.js";
@@ -89,7 +89,6 @@ function nearLimit(used, max) {
  */
 export async function handleRequest(req, ctx) {
   const url = new URL(req.url);
-  if (isRemovedIngestPath(url.pathname)) return json({ error: "gone" }, 410);
   const resolved = requestLimits(ctx);
   if (resolved.invalid) {
     logLine({ limit_profile_invalid: true, route: url.pathname });
@@ -101,6 +100,10 @@ export async function handleRequest(req, ctx) {
     const response = json({ error: "unauthorized" }, 401);
     if (url.pathname === "/mcp") response.headers.set("www-authenticate", `Bearer realm="${MCP_SERVER_NAME}"`);
     return response;
+  }
+  if (isRemovedIngestPath(url.pathname)) {
+    console.error(redactRequestTarget(`${req.method || ""} ${req.url || ""}`, ctx.token, ctx.urlToken));
+    return json({ error: "gone" }, 410);
   }
   const route = ROUTES.find((entry) => (entry.method == null || entry.method === req.method) && entry.match(url.pathname));
   if (!route) return json({ error: "not_found" }, 404);

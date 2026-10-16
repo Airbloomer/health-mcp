@@ -12,7 +12,7 @@ import { authed, redactRequestTarget, tokenClass } from "../src/core/auth.js";
 import { resetDateTimeFormatCache } from "../src/core/datetime.js";
 import { canonicalStart } from "../src/core/health-connect.js";
 import { handleRequest, json, ROUTES } from "../src/core/http.js";
-import { FREE_MAX_BYTES, NODE_MAX_BYTES, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
+import { D1_DAILY_ROW_READ_LIMIT, D1_DAILY_ROW_WRITE_LIMIT, FREE_MAX_BYTES, isDailyWriteLimitError, NODE_MAX_BYTES, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
 import { SENSITIVE_METRICS } from "../src/core/metrics.js";
 import { localDate } from "../src/core/parse.js";
 import { parseShortcuts, shortcutDays } from "../src/core/shortcuts.js";
@@ -720,7 +720,11 @@ test("36 removed ingest paths are redacted in the Node log", async () => {
       `/ingest/health-export-pro/${"%63".repeat(token.length)}?token=${"%63".repeat(token.length)}`,
     ];
     for (const pathname of paths) {
-      const response = await fetch(`http://127.0.0.1:${port}${pathname}`, { method: "POST", body: "{}" });
+      const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        body: "{}",
+      });
       assert.equal(response.status, 410, pathname);
     }
   } finally {
@@ -735,10 +739,16 @@ test("36 removed ingest paths are redacted in the Node log", async () => {
 test("37 daily write limit uses UTC midnight", async () => {
   const expected = String(secondsUntilUtcMidnight(NOW));
   assert.equal(expected, "43200");
+  assert.equal(isDailyWriteLimitError(new Error(D1_DAILY_ROW_WRITE_LIMIT)), true);
+  assert.equal(isDailyWriteLimitError(new Error(`${D1_DAILY_ROW_READ_LIMIT} See https://developers.cloudflare.com/d1/platform/limits/ for more details.`)), true);
+  assert.equal(isDailyWriteLimitError(new Error("D1 daily quota exceeded")), false);
+  assert.equal(isDailyWriteLimitError(new Error("Exceeded maximum DB size.")), false);
   await eachBackend(async (backend) => {
     const original = backend.storage.insertIngest.bind(backend.storage);
     backend.storage.insertIngest = async () => {
-      throw new Error("D1 daily quota exceeded");
+      const error = new Error("D1_ERROR");
+      error.cause = new Error(`${D1_DAILY_ROW_WRITE_LIMIT} See https://developers.cloudflare.com/d1/platform/limits/ for more details.`);
+      throw error;
     };
     const response = await post(backend, "/ingest/shortcuts", shortcutSteps());
     assert.equal(response.status, 429);

@@ -192,7 +192,9 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   assert.equal(path.status, 200);
   assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10);
   const removed = await handleRequest(request(`/ingest/life-dashboard/${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { urlToken: `${URL_SECRET}` }));
-  assert.equal(removed.status, 410);
+  assert.equal(removed.status, 401);
+  const removedBearer = await handleRequest(request(`/ingest/life-dashboard/${URL_SECRET}`, { body: "{}" }), ctx(new MemoryStorage(), { urlToken: `${URL_SECRET}` }));
+  assert.equal(removedBearer.status, 410);
 
   const wrongBearer = await handleRequest(request(`/ingest/hc-webhook?token=${URL_SECRET}`, { token: "nope", body: "{}" }), environment);
   assert.equal(wrongBearer.status, 401);
@@ -231,9 +233,12 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   for (const [method, pathname] of denied) {
     const body = method === "GET" || method === "DELETE" ? undefined : "{}";
     const response = await handleRequest(request(pathname, { method, token: "", body }), environment);
-    const gone = /^\/ingest\/?$/.test(pathname.split("?")[0])
-      || /^\/ingest\/(?:life-dashboard|health-export-pro|syncfit)(?:\/|$)/.test(pathname.split("?")[0]);
-    assert.equal(response.status, gone ? 410 : 401, `${method} ${pathname}`);
+    assert.equal(response.status, 401, `${method} ${pathname}`);
+  }
+  for (const pathname of ["/ingest", "/ingest/life-dashboard", "/ingest/health-export-pro", "/ingest/syncfit"]) {
+    const response = await handleRequest(request(pathname, { body: "{}" }), environment);
+    assert.equal(response.status, 410, pathname);
+    assert.deepEqual(await response.json(), { error: "gone" }, pathname);
   }
   const summaryBearer = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET", token: `${URL_SECRET}` }), environment);
   assert.equal(summaryBearer.status, 401);
@@ -264,7 +269,9 @@ test("encoded, padded, short, and reused URL tokens are rejected", async () => {
   }
   for (const pathname of [`/ingest/life-dashboard/${encodedPath}`, `/ingest/life-dashboard/${URL_SECRET}%20`]) {
     const response = await handleRequest(request(pathname, { token: "", body: "{}" }), environment);
-    assert.equal(response.status, 410, pathname);
+    assert.equal(response.status, 401, pathname);
+    const authedGone = await handleRequest(request(pathname, { body: "{}" }), environment);
+    assert.equal(authedGone.status, 410, pathname);
   }
 
   const logs = [];

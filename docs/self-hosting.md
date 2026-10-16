@@ -81,7 +81,7 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | Variable | Required | Where | Purpose |
 | --- | --- | --- | --- |
 | `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token for every route. Empty means every bearer request is rejected. |
-| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook` and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Must match `^[A-Za-z0-9_-]{32,}$`. Unset, too short, or equal to `HEALTH_INGEST_TOKEN` disables URL-token auth. It does not authenticate `/summary`, `/mcp`, or any other route. |
+| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Opt-in, lower-trust write-only token for `POST /ingest/hc-webhook` and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Unset leaves URL-token auth off. Must match `^[A-Za-z0-9_-]{32,}$`. Too short, or equal to `HEALTH_INGEST_TOKEN`, also disables it. It does not authenticate `/summary`, `/mcp`, or any other route. |
 | `HEALTH_TIMEZONE` | no | Wrangler `[vars]`, or the process environment | IANA zone used when a timestamp has no numeric offset. Default `UTC` when unset. [`wrangler.example.toml`](../wrangler.example.toml) sets `America/Los_Angeles`. |
 | `DB` | yes on Cloudflare | Wrangler D1 binding | Must be named `DB`. |
 | `DATABASE_URL` | no | Node | `postgres://` or `postgresql://` URL, otherwise a SQLite file path. |

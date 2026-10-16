@@ -40,8 +40,10 @@ async function applyBackend(backend, timeZone) {
 
 async function rows(backend) {
   if (backend.kind === "memory") return [...backend.storage.workouts.values()];
-  if (backend.kind === "postgres") return (await backend.raw.query("SELECT name, start, date, duration_min, kcal FROM workouts ORDER BY start")).rows;
-  return backend.raw.prepare("SELECT name, start, date, duration_min, kcal FROM workouts ORDER BY start").all();
+  if (backend.kind === "postgres") {
+    return (await backend.raw.query("SELECT name, start, date, duration_min, kcal, writer FROM workouts ORDER BY start")).rows;
+  }
+  return backend.raw.prepare("SELECT name, start, date, duration_min, kcal, writer FROM workouts ORDER BY start").all();
 }
 
 test("L1 L3 L4 L5 L6 L7 workout start backfill", async () => {
@@ -103,6 +105,63 @@ test("L1 L3 L4 L5 L6 L7 workout start backfill", async () => {
         : backend.raw.prepare("SELECT id FROM schema_migrations WHERE id = ?").all(WORKOUT_STARTS_MIGRATION_ID);
       assert.equal(marked.length, 1, name);
     }
+  });
+});
+
+test("a URL-token row does not replace a bearer row or a legacy NULL row", async () => {
+  await eachBackend(async (backend, name) => {
+    await seedWorkout(backend, {
+      name: "Running",
+      start: "2026-10-15T15:00:00Z",
+      date: "2026-10-15",
+      duration_min: 30,
+      kcal: 300,
+      writer: "bearer",
+    });
+    await seedWorkout(backend, {
+      name: "Running",
+      start: "2026-10-15T15:00:00.000Z",
+      date: "2026-10-15",
+      duration_min: 90,
+      kcal: 1,
+      writer: "url",
+    });
+    await seedWorkout(backend, {
+      name: "Walk",
+      start: "2026-10-16T15:00:00Z",
+      date: "2026-10-16",
+      duration_min: 20,
+      kcal: 100,
+      writer: null,
+    });
+    await seedWorkout(backend, {
+      name: "Walk",
+      start: "2026-10-16T15:00:00.000Z",
+      date: "2026-10-16",
+      duration_min: 90,
+      kcal: 1,
+      writer: "url",
+    });
+    const plan = await applyBackend(backend, "UTC");
+    const running = plan.actions.find((action) => action.update?.name === "Running" || action.deletes.some((row) => row.name === "Running"));
+    const walk = plan.actions.find((action) => action.update?.name === "Walk" || action.deletes.some((row) => row.name === "Walk"));
+    assert.equal(running.deletes.some((row) => row.start === "2026-10-15T15:00:00Z"), false, name);
+    assert.equal(running.deletes.some((row) => row.start === "2026-10-15T15:00:00.000Z"), true, name);
+    assert.equal(walk.deletes.some((row) => row.start === "2026-10-16T15:00:00Z"), false, name);
+    assert.equal(walk.deletes.some((row) => row.start === "2026-10-16T15:00:00.000Z"), true, name);
+    const stored = await rows(backend);
+    const run = stored.filter((row) => row.name === "Running");
+    const walks = stored.filter((row) => row.name === "Walk");
+    assert.equal(run.length, 1, name);
+    assert.equal(run[0].start, "2026-10-15T15:00:00.000Z", name);
+    assert.equal(Number(run[0].duration_min), 30, name);
+    assert.equal(Number(run[0].kcal), 300, name);
+    assert.equal(run[0].writer, "bearer", name);
+    assert.equal(walks.length, 1, name);
+    assert.equal(walks[0].start, "2026-10-16T15:00:00.000Z", name);
+    assert.equal(Number(walks[0].duration_min), 20, name);
+    assert.equal(Number(walks[0].kcal), 100, name);
+    assert.equal(walks[0].writer ?? null, null, name);
   });
 });
 

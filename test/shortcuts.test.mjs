@@ -140,7 +140,8 @@ test("HEALTH_INGEST_URL_TOKEN works on /ingest/shortcuts, write-only and off whe
   assert.equal((await handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { token: URL_SECRET, body: payload }), on())).status, 401);
   assert.equal((await handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { method: "GET", token: "" }), on())).status, 401);
   assert.equal((await handleRequest(request(`/summary?date=2026-10-14&token=${URL_SECRET}`, { method: "GET", token: "" }), on())).status, 401);
-  assert.equal((await handleRequest(request(`/ingest?token=${URL_SECRET}`, { token: "", body: payload }), on())).status, 410);
+  assert.equal((await handleRequest(request(`/ingest?token=${URL_SECRET}`, { token: "", body: payload }), on())).status, 401);
+  assert.equal((await handleRequest(request("/ingest", { body: payload }), on())).status, 410);
   assert.equal(redactRequestTarget(`POST /ingest/shortcuts/${URL_SECRET}`, "tok", ""), "POST /ingest/shortcuts/[redacted]");
 });
 

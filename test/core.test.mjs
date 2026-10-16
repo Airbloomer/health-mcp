@@ -247,6 +247,8 @@ test("removed ingest routes match any other unknown route", async () => {
     "/ingest/syncfit",
   ];
   for (const pathname of paths) {
+    const anonymous = await handleRequest(request(pathname, { method: "POST", token: "", body: "{}" }), ctx);
+    assert.equal(anonymous.status, 401, pathname);
     const response = await handleRequest(request(pathname, { method: "POST", body: "{}" }), ctx);
     assert.equal(response.status, 410, pathname);
     assert.deepEqual(await response.json(), { error: "gone" }, pathname);

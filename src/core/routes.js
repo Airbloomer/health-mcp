@@ -92,7 +92,7 @@ export function pathToken(pathname) {
   return null;
 }
 
-/** Removed phone-adapter paths. The response does not depend on the token. */
+/** Removed phone-adapter paths. Callers are authenticated before this returns 410. */
 export function isRemovedIngestPath(pathname) {
   return REMOVED_INGEST.some((pattern) => pattern.test(pathname));
 }
