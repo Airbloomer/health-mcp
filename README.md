@@ -1,6 +1,6 @@
 # health-mcp
 
-A self-hosted health data endpoint. It works with data exported from Apple Health and serves daily summaries. `POST /ingest` accepts the [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api) JSON format (export version 2) and the other sources in Works with. `GET /summary` returns one calendar day's totals.
+A self-hosted health data endpoint. It works with data exported from Apple Health and with Android Health Connect, and serves daily summaries. `POST /ingest` accepts the [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api) JSON format (export version 2) and the other sources in Works with. `GET /summary` returns one calendar day's totals.
 
 The parsing, aggregation, auth, HTTP handling, and read-only MCP endpoint live in `src/core` and depend only on web standards (`Request`, `Response`, `fetch`, `crypto`, `Intl`). Persistence is a small storage interface. Two adapters implement it:
 
@@ -19,7 +19,11 @@ Self-hosted: you run this software and you are responsible for securing your end
 
 ## API
 
-`/ingest`, `/import/apple-health`, `/import/apple-health/chunk`, `/ingest/health-export-pro`, `/ingest/syncfit`, `/summary`, and `/mcp` require `Authorization: Bearer <HEALTH_INGEST_TOKEN>`. A missing or wrong token returns `401` and `{ "error": "unauthorized" }`. Responses are JSON and send `cache-control: no-store`.
+`/ingest`, `/import/apple-health`, `/import/apple-health/chunk`, `/ingest/health-export-pro`, `/ingest/syncfit`, `/ingest/hc-webhook`, `/ingest/life-dashboard`, `/summary`, and `/mcp` require `Authorization: Bearer <HEALTH_INGEST_TOKEN>`. A missing or wrong token returns `401` and `{ "error": "unauthorized" }`. Responses are JSON and send `cache-control: no-store`.
+
+The bearer header is the default and is what both Android apps can send as a custom header. `GET /summary`, `POST /mcp`, and every other route accept only that header. They never accept a token in the query string or the path, even when the value matches `HEALTH_INGEST_TOKEN`.
+
+`POST /ingest/hc-webhook` and `POST /ingest/life-dashboard` can also accept a different secret, `HEALTH_INGEST_URL_TOKEN`, when the `Authorization` header is absent. Prefer the path form, `/ingest/hc-webhook/<token>` or `/ingest/life-dashboard/<token>`, over the `token` query parameter. The query form accepts only a literal `token=` key, not an encoded key such as `%74oken`. The path segment and the query value are compared raw: they are not percent-decoded or trimmed. The secret must match `^[A-Za-z0-9_-]{32,}$`. A shorter value, a space, or any other character leaves URL-token auth off. It is also left off when the value is the same as `HEALTH_INGEST_TOKEN`. It is rejected on every other route and method, including `GET` of those same paths. The comparison is constant-time. A request that sends an `Authorization` header is checked only against `HEALTH_INGEST_TOKEN`; the URL token is not a bearer credential and cannot read. An empty `HEALTH_INGEST_TOKEN` still rejects every bearer request. This process redacts `token` query values, including percent-encoded keys such as `%74oken`, and those path segments from its own error logs. Cloudflare request logs cannot be redacted that way. See [Security](#security).
 
 ### `POST /ingest`
 
@@ -109,13 +113,29 @@ Health Export Pro's published JSON is accepted on `POST /ingest` and on `POST /i
 
 SyncFit's native JSON is accepted on `POST /ingest` and `POST /ingest/syncfit`. The body is `{ "schemaVersion": 1, "samples": [] }` with no `data` object. Each sample has `metric`, `start`, `value`, and `unit`. Timestamps are ISO 8601; an offset keeps the calendar date in the string. `basal_energy` is stored as `basal_energy_burned`, `body_mass` as `weight_body_mass`, and dietary identifiers map onto the summary metrics (`dietary_energy` or `dietary_energy_consumed`, `dietary_protein`, `dietary_carbohydrates`, `dietary_fat_total`). Other snake_case metrics are stored only when `HEALTH_METRIC_ALLOWLIST` names them.
 
-On `POST /ingest` the order is XML or a zip exported from Apple Health, then Health Export Pro, then SyncFit, then Health Auto Export. SyncFit is used only when `data` is absent. A Health Auto Export body that also carries `schemaVersion` and `samples` stays Health Auto Export.
+On `POST /ingest` the order is XML or a zip exported from Apple Health, then Health Export Pro, then SyncFit, then Life Dashboard Companion, then HC Webhook, then Health Auto Export. SyncFit is used only when `data` is absent. A Health Auto Export body that also carries `schemaVersion` and `samples` stays Health Auto Export.
 
 A `workout` sample uses `value` as duration in seconds and `details.activityType` as the HealthKit activity integer (`37` Running, `50` Traditional Strength Training, `52` Walking). `details.totalEnergy` is kcal. Routes and other detail payloads are ignored.
 
 Samples collapse to one row per metric and timestamp, then one row per metric and date, with the same `n` upsert. Sending the same body again does not double the totals. A later batch replaces a metric-day only when it has at least as many samples. `aggregation` of `hour`, `day`, `week`, or `month` is stored as the samples in that body, so a one-row daily total does not replace a fuller raw day.
 
 The Health Auto Export preview layout is a different JSON shape and is not covered by these tests.
+
+### HC Webhook
+
+HC Webhook's JSON is accepted on `POST /ingest/hc-webhook` and on `POST /ingest` when the body has `timestamp` and `app_version` and is not one of the formats above. Record arrays use the names and units in the app's webhook reference: `steps.count`, `active_calories.calories` in kcal, `weight.kilograms`, `body_fat.percentage`, `nutrition` (`calories`, `protein_grams`, `carbs_grams`, `fat_grams`), and `exercise` with `type`, `start_time`, `end_time`, and `duration_seconds`. `type` is Health Connect's exercise type as a decimal string (`56` Running, `79` Walking, `70` Strength Training). The exercise object has no energy field, so workout `kcal` is null. Sleep stages, cadence, and route-like fields are not stored. `total_calories`, `distance`, heart rate, and sleep duration are stored only when `HEALTH_METRIC_ALLOWLIST` names `total_calories`, `distance`, `heart_rate`, or `sleep_analysis`. `basal_metabolic_rate` is watts in this payload and is not converted into `basal_kcal`. The app also emits `bmi` when weight and height are both present; that is stored as `body_mass_index` only when allowlisted.
+
+Timestamps are UTC instants (`Z`). The calendar day comes from `HEALTH_TIMEZONE`. A stored day must be a real calendar date from `2000-01-01` through two days after the request is received. `2026-13-45`, `2026-02-29` in a non-leap year, a day before 2000, and a timestamp in year 9999 are `invalid_payload`. Steps and active or total calories must be from 0 through 1,000,000 steps or 100,000 kcal. Weight must be from 0.5 kg through 500 kg. Body fat must be from 0% through 100%. A value outside those bounds is `invalid_payload` and is not stored. A heart-rate aggregate includes `avg` and a `bpm` alias of that average; one sample is stored. The same `n` upsert applies. Daily step resolution is one cumulative row per day (`n` stays 1), so a later sync replaces that day. A full or bucketed series replaces a metric-day only when the new request has at least as many samples, and it does not add to the previous total. Incremental sync sends only records new since the last success, so send a range that still contains the whole day for each metric you want replaced. This adapter follows the published JSON reference and the app source that builds it. It has not been verified against a live phone session.
+
+### Life Dashboard Companion
+
+Life Dashboard Companion's health JSON is accepted on `POST /ingest/life-dashboard` and on `POST /ingest`. A health payload has `source` of `health_connect` (Android) or `healthkit_ios` (the iPhone app, which publishes the same shape). `steps`, `distance`, `active_calories`, and `total_calories` in `daily_totals` are the values stored for those dates. Raw records for the same metric and date in that request are not added, because phone and watch copies would otherwise both count. `daily_totals.date` is already the phone's local day and is stored as that date. Other timestamps are UTC instants; a record `metadata` zone offset (`zone_offset`, `start_zone_offset`, or `end_zone_offset`) selects the calendar day when it is present, and otherwise the day comes from `HEALTH_TIMEZONE`.
+
+`active_calories` maps to `active_kcal`. `basal_metabolic_rate.kilocalories_per_day` maps to `basal_kcal` (this field is a daily rate, unlike HC Webhook's watts). Nutrition uses the same summary metrics as an export from Apple Health. Exercise `type` is the Health Connect decimal string, or a name such as `running` from the iPhone app. Session `kcal` is null; the published exercise object has no energy field. Segments and laps are ignored. `total_calories` and `distance` are not summary fields. Bucketed series (`bucket_start`, `total` or `avg`) are stored as the samples in that request. A later request replaces a metric-day only when its sample count is at least the stored `n`. A one-row daily total therefore does not replace a day that was previously stored from a longer raw series. Leave daily totals on if that is the figure you want kept.
+
+`daily_totals.date` and record timestamps use the same calendar window as HC Webhook: a real `YYYY-MM-DD` from `2000-01-01` through two days after the request. Impossible dates such as `2026-13-45` are `invalid_payload`. Steps, distance, and calorie totals must be non-negative and inside the same caps (1,000,000 steps, 1,000,000 meters, 100,000 kcal). Weight is 0.5 kg through 500 kg. Body fat is 0% through 100%. Basal energy uses the calorie cap.
+
+A test ping returns 200 and stores nothing only when `test` is true, `source` is `health_connect`, `healthkit_ios`, or `screen_time`, and `timestamp` is a non-empty string. `app_version` is not required for that ping. A body that is only `{"test": true}` is `invalid_payload`. A payload that only names `deleted_records` is accepted and does not delete rows; this store replaces whole metric-days and does not drop individual records. `source: "screen_time"` without `test: true` is rejected with `invalid_payload`. The `X-Signature` HMAC is not checked. Use `HEALTH_INGEST_TOKEN`. This adapter follows the published payload reference. It has not been verified against a live phone session.
 
 ### `GET /summary?date=YYYY-MM-DD`
 
@@ -215,7 +235,8 @@ Other Streamable HTTP clients use the same URL and header. Point the host at whe
 
 | Variable | Required | Where | Purpose |
 | --- | --- | --- | --- |
-| `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token. Empty means every request is rejected. |
+| `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token for every route. Empty means every bearer request is rejected. |
+| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook` and `POST /ingest/life-dashboard` when the app cannot send `Authorization`. Must match `^[A-Za-z0-9_-]{32,}$`. Unset, too short, or equal to `HEALTH_INGEST_TOKEN` disables URL-token auth. It does not authenticate `/summary`, `/mcp`, or any other route. |
 | `HEALTH_TIMEZONE` | no | Wrangler `[vars]`, or the process environment | IANA zone used when a timestamp has no numeric offset. Default `UTC` when unset. [`wrangler.example.toml`](wrangler.example.toml) sets `America/Los_Angeles`. |
 | `DB` | yes on Cloudflare | Wrangler D1 binding | Must be named `DB`. |
 | `DATABASE_URL` | no | Node | `postgres://` or `postgresql://` URL, otherwise a SQLite file path. |
@@ -229,11 +250,15 @@ Other Streamable HTTP clients use the same URL and header. Point the host at whe
 
 Copy [`.env.example`](.env.example) to `.env` for Node, or [`dev.vars.example`](dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
-On Cloudflare, set the token with `npx wrangler secret put HEALTH_INGEST_TOKEN`. Put `HEALTH_TIMEZONE` in `[vars]` if you do not want `UTC`. The example file sets it to `America/Los_Angeles`; the code still defaults to `UTC` when the variable is absent. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` (gitignored) and replace `database_id`. Set `account_id` in that local file only if Wrangler should target an account other than the one you are logged in to. Do not commit either value, and do not commit a custom hostname.
+On Cloudflare, set the bearer token with `npx wrangler secret put HEALTH_INGEST_TOKEN`. Set the optional write-only URL token the same way, `npx wrangler secret put HEALTH_INGEST_URL_TOKEN`, only if a phone cannot send the header. Do not put either secret in `[vars]`. Put `HEALTH_TIMEZONE` in `[vars]` if you do not want `UTC`. The example file sets it to `America/Los_Angeles`; the code still defaults to `UTC` when the variable is absent. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` (gitignored) and replace `database_id`. Set `account_id` in that local file only if Wrangler should target an account other than the one you are logged in to. Do not commit either value, and do not commit a custom hostname.
 
 ## Security
 
-`HEALTH_INGEST_TOKEN` is the only protection. `/ingest`, the import routes, `/summary`, and `/mcp` accept any client that sends that bearer token. There is no user account, network allowlist, or second check. An empty token rejects every request. Anyone who has the token can read and write the health data this endpoint stores.
+`HEALTH_INGEST_TOKEN` is the credential for every route. `/ingest`, the import routes, `/summary`, and `/mcp` accept any client that sends that bearer token. There is no user account, network allowlist, or second check. An empty token rejects every bearer request. Anyone who has the token can read and write the health data this endpoint stores.
+
+`HEALTH_INGEST_URL_TOKEN` is a separate, optional, write-only secret. Leave it unset unless HC Webhook or Life Dashboard Companion cannot send `Authorization`. It must be at least 32 characters and use only `A-Z`, `a-z`, `0-9`, `_`, and `-`. While it is unset, shorter, or contains any other character, `?token=` and `/ingest/hc-webhook/<token>` or `/ingest/life-dashboard/<token>` are rejected. The server also treats it as unset when it is the same string as `HEALTH_INGEST_TOKEN`, including when one of them has surrounding spaces, and logs a warning that does not include the secret. When it is set and different, it authenticates only `POST` to those two routes. The path segment is matched raw, with no percent-decoding and no trimming, so a `%2D` in place of `-` or a trailing `%20` does not authenticate. The query form accepts only the literal key `token`; `%74oken` does not. `GET`, `PUT`, and `DELETE` of those paths are rejected, and so are `/summary`, `/mcp`, `/ingest`, `/ingest/syncfit`, `/ingest/health-export-pro`, and the import routes. Sending the URL secret as `Authorization: Bearer` does not authenticate. Generate it with a second `openssl rand -hex 32`. Do not copy `HEALTH_INGEST_TOKEN` into it.
+
+Prefer the `Authorization` header. If the app cannot send one, put `HEALTH_INGEST_URL_TOKEN` in the path (`/ingest/hc-webhook/<token>`) rather than in `?token=`. A query string is more often copied into the `Referer` header, browser history, and analytics than a path segment. Both forms are still exposed. A token in a URL is copied into browser history, app history, screenshots, shared QR codes, the `Referer` header when the client requests another URL, reverse-proxy logs, and platform logs. Node redacts the query value and the path segment from this process's own error log, after decoding percent-encoded keys such as `%74oken`. That redaction does not apply to Cloudflare. Workers request logs, Workers Logs, Logpush, and Tail record the full URL, and nothing in the Worker can rewrite those. Do not enable the URL token on a public `workers.dev` hostname if those logs are on. Rotate `HEALTH_INGEST_URL_TOKEN` on its own when a URL may have been exposed. Header clients keep working across that rotation.
 
 Use at least 32 random bytes. This prints 32 bytes as hex:
 
@@ -328,11 +353,11 @@ Import an export from Apple Health into that database with `node src/cli/import-
 ## Works with
 
 1. **Export from Apple Health** (supported). Data exported from Apple Health is the first supported source. The Health app writes it as `export.xml`. Send `export.xml`, or the zip that contains it, to `POST /ingest` when it fits the ingest limit. The large stream, `POST /import/apple-health`, is Node-only. A Worker stops at about a 100 MB body, so on Cloudflare run `node src/cli/import-apple-health.js` with `--chunk-url` pointed at `POST /import/apple-health/chunk`. That chunk route takes whole days that are already one row per metric and date. The same `n` upsert applies, so a metric-day has to arrive complete in one request. An export lists every source, and adding them together would double-count steps and energy. The import keeps one source per metric-day: the largest total for summed metrics, and the newest reading for weight and body fat. `HEALTH_SOURCE_PRIORITY` is an optional comma-separated list of `sourceName` values; the first listed source that has samples that day wins instead.
-2. **Health Auto Export** (supported). REST JSON, export version 2, posted to `POST /ingest`. The shape is documented above, and the iOS setup is below. Any other client that sends that same shape can use this path too.
-3. **SyncFit** (native format supported). A body with `schemaVersion` 1 and a `samples` array, and no `data` object, is accepted on `POST /ingest` and `POST /ingest/syncfit`. `basal_energy` is stored as `basal_energy_burned`, `body_mass` as `weight_body_mass`, and dietary sample names map onto the summary metrics. A `workout` sample's `value` is duration in seconds, and `details.activityType` is the HealthKit activity integer. The Health Auto Export preview layout is untested.
-4. **Health Export Pro** (published payload supported, live app untested). A body with `exportDate`, `startDate`, `endDate`, `syncSource`, and `data` keyed by HealthKit type is accepted on `POST /ingest` and `POST /ingest/health-export-pro`. Quantity samples use the same metric names as an export from Apple Health. Workout `workoutActivityType` is the HealthKit integer. Medication sections and workout routes are ignored.
-5. **iOS Shortcuts** (untested). Build the Health Auto Export JSON shape and POST it to `/ingest`. One recipe: Find Health Samples for a metric you store, put each sample's date and quantity into `data.metrics[].data` as `{ "date", "qty" }` with `name` and `units`, then Get Contents of URL with method POST, the header `Authorization` set to `Bearer <HEALTH_INGEST_TOKEN>`, and that JSON as the body. Health samples cannot be read while the phone is locked, so the shortcut has to run while the device is unlocked. This recipe has not been run against this server.
-6. **Android (planned)**. HC Webhook and Life Dashboard Companion adapters are coming.
+2. **Android Health Connect** (published payloads supported, live apps untested). HC Webhook posts to `POST /ingest/hc-webhook`. Life Dashboard Companion posts to `POST /ingest/life-dashboard`. Both write the same summary metrics as an iPhone export: steps, active energy, dietary energy, protein, carbohydrates, fat, weight, and body fat. Setup for each app is below.
+3. **Health Auto Export** (supported). REST JSON, export version 2, posted to `POST /ingest`. The shape is documented above, and the iOS setup is below. Any other client that sends that same shape can use this path too.
+4. **SyncFit** (native format supported). A body with `schemaVersion` 1 and a `samples` array, and no `data` object, is accepted on `POST /ingest` and `POST /ingest/syncfit`. `basal_energy` is stored as `basal_energy_burned`, `body_mass` as `weight_body_mass`, and dietary sample names map onto the summary metrics. A `workout` sample's `value` is duration in seconds, and `details.activityType` is the HealthKit activity integer. The Health Auto Export preview layout is untested.
+5. **Health Export Pro** (published payload supported, live app untested). A body with `exportDate`, `startDate`, `endDate`, `syncSource`, and `data` keyed by HealthKit type is accepted on `POST /ingest` and `POST /ingest/health-export-pro`. Quantity samples use the same metric names as an export from Apple Health. Workout `workoutActivityType` is the HealthKit integer. Medication sections and workout routes are ignored.
+6. **iOS Shortcuts** (untested). Build the Health Auto Export JSON shape and POST it to `/ingest`. One recipe: Find Health Samples for a metric you store, put each sample's date and quantity into `data.metrics[].data` as `{ "date", "qty" }` with `name` and `units`, then Get Contents of URL with method POST, the header `Authorization` set to `Bearer <HEALTH_INGEST_TOKEN>`, and that JSON as the body. Health samples cannot be read while the phone is locked, so the shortcut has to run while the device is unlocked. This recipe has not been run against this server.
 
 ## Health Auto Export
 
@@ -347,6 +372,33 @@ Install Health Auto Export on iOS and create **two** REST API automations that p
 7. Use **Manual Export** to send a sample, then call `GET /summary?date=YYYY-MM-DD`. Send whole days. Leave **Batch requests** off when a single metric can have more than one sample on the same calendar day. A shorter request does not replace a fuller day, so a batch that splits that day never becomes the full total. Re-sending the same whole day does not double the totals.
 
 Automations run only while the phone is unlocked, which is an iOS limit.
+
+## HC Webhook
+
+Install [HC Webhook](https://github.com/mcnaveen/health-connect-webhook) on Android. The app reads Health Connect and POSTs JSON. Payload fields are documented in that repository's `docs/webhook.md`.
+
+1. Grant Health Connect read permission for the types you want stored.
+2. Add a webhook. URL: `https://<your-host>/ingest/hc-webhook`. Delivery format **JSON**.
+3. Add a custom header. Key `Authorization`, value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
+4. For steps, prefer **Daily** resolution so each day is one cumulative total. That row's `n` stays 1, and a later sync replaces the day instead of leaving a partial batch in place. If you use full or bucketed resolution, each request that should win has to include every sample for that metric-day. Incremental sync only sends records new since the last success, and this server does not add that batch onto the stored total.
+5. Weight is stored in kilograms. Set `HEALTH_TIMEZONE` to the phone's zone. These timestamps are UTC instants and do not carry a numeric offset.
+6. If this install cannot set an `Authorization` header, set `HEALTH_INGEST_URL_TOKEN` to its own random value (not `HEALTH_INGEST_TOKEN`) and use `https://<your-host>/ingest/hc-webhook/<HEALTH_INGEST_URL_TOKEN>`. Prefer that path over `?token=`. The secret can only POST to this route and `/ingest/life-dashboard`. It cannot call `/summary` or `/mcp`. Leave the variable unset to disable those URLs. The header is safer: Cloudflare request logs, Workers Logs, Logpush, and Tail keep the full URL, and this Worker cannot redact them. A query token can also leak through `Referer`. See [Security](#security).
+7. Run a sync, then call `GET /summary?date=YYYY-MM-DD`.
+
+Protobuf delivery is not accepted. The local on-device HTTP server speaks the same JSON; point a client at it only on a network you trust, then POST that JSON here with the bearer token.
+
+## Life Dashboard Companion
+
+Install [Life Dashboard Companion](https://github.com/owen282000/life-dashboard-companion-app) on Android. The health webhook format is documented in that repository's `docs/webhook.md`. The iPhone app posts the same shape with `source` `healthkit_ios` and can use this route as well.
+
+1. On the **Health** tab, grant Health Connect permission for the types you store.
+2. Under webhook URLs, add `https://<your-host>/ingest/life-dashboard`.
+3. Under webhook headers, add `Authorization` with value `Bearer <HEALTH_INGEST_TOKEN>`. A URL added by QR pairing does not receive those headers. For that address, set `HEALTH_INGEST_URL_TOKEN` and put that write-only secret in the path, as described for HC Webhook. Prefer the path over `?token=`. Do not put `HEALTH_INGEST_TOKEN` in the URL. Treat a QR code or screenshot of that URL as a leaked write secret and rotate `HEALTH_INGEST_URL_TOKEN`.
+4. Leave **Daily totals in payload** on. Steps, distance, and calories are taken from `daily_totals` so a walk recorded by both phone and watch is counted once. Today's total is a running total; sending it again replaces the stored day (`n` stays 1) and does not add to it.
+5. This server does not check `X-Signature`. An HMAC secret in the app is optional and is not the credential this route uses.
+6. Set `HEALTH_TIMEZONE` to the phone's zone. `daily_totals.date` is already that local day. Record timestamps are UTC; when record metadata includes a zone offset, that offset picks the day.
+7. Do not point the Screen Time webhook at this URL. That payload is rejected. Deletions named in `deleted_records` are accepted and not applied.
+8. Use **Test ping**, then **Sync Now**, then `GET /summary?date=YYYY-MM-DD`. A backfill of past days is available on the Health tab. Each day in that backfill still has to arrive as a complete metric-day for the `n` rule.
 
 ## Development
 
@@ -365,6 +417,9 @@ src/core/hk.js           HealthKit quantity and workout names
 src/core/apple-export.js streaming export.xml and zip parser
 src/core/health-export-pro.js
 src/core/syncfit.js      SyncFit schemaVersion 1
+src/core/health-connect.js  shared Health Connect units and exercise names
+src/core/hc-webhook.js   HC Webhook JSON
+src/core/life-dashboard.js  Life Dashboard Companion JSON
 src/cli/import-apple-health.js
 src/adapters/d1.js       D1 storage
 src/adapters/cloudflare.js

@@ -2,6 +2,7 @@ import http from "node:http";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { activeUrlToken, redactRequestTarget } from "../core/auth.js";
 import { handleRequest } from "../core/http.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
@@ -94,7 +95,7 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
       let request;
@@ -110,7 +111,7 @@ export function startServer({ storage, token = "", timeZone, storeRaw, metricAll
         const body = await readBody(req);
         request = toWebRequest(req, body);
       }
-      const response = await handleRequest(request, { storage, token, timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins });
+      const response = await handleRequest(request, { storage, token, urlToken, timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins });
       const payload = Buffer.from(await response.arrayBuffer());
       const headers = { "content-length": payload.length };
       response.headers.forEach((value, key) => {
@@ -124,7 +125,8 @@ export function startServer({ storage, token = "", timeZone, storeRaw, metricAll
         req.destroy();
         return;
       }
-      console.error(error instanceof Error ? error.message : error);
+      const message = error instanceof Error ? error.message : error;
+      console.error(redactRequestTarget(`${req.method || ""} ${req.url || ""} ${message}`, token, urlToken));
       if (!res.headersSent) writeJson(res, 500, { error: "internal" });
       else res.destroy();
     }
@@ -143,6 +145,7 @@ function isMainModule() {
 
 if (isMainModule()) {
   const token = process.env.HEALTH_INGEST_TOKEN || "";
+  const urlToken = activeUrlToken(process.env.HEALTH_INGEST_URL_TOKEN, token);
   const timeZone = process.env.HEALTH_TIMEZONE;
   const port = Number(process.env.PORT || 8787);
   const host = process.env.HOST || "0.0.0.0";
@@ -152,6 +155,7 @@ if (isMainModule()) {
   const server = await startServer({
     storage,
     token,
+    urlToken,
     timeZone,
     storeRaw: process.env.HEALTH_STORE_RAW,
     metricAllowlist: process.env.HEALTH_METRIC_ALLOWLIST,

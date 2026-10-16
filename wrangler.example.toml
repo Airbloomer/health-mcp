@@ -10,6 +10,13 @@ preview_urls = false
 # Optional. Wrangler uses the account you are logged in to when this is omitted.
 # account_id = "your-cloudflare-account-id"
 
+# HEALTH_INGEST_TOKEN and HEALTH_INGEST_URL_TOKEN are Worker secrets, not [vars].
+# Leave HEALTH_INGEST_URL_TOKEN unset unless a phone cannot send Authorization.
+# It must match ^[A-Za-z0-9_-]{32,}$ and must not equal HEALTH_INGEST_TOKEN.
+# It is write-only for POST /ingest/hc-webhook and POST /ingest/life-dashboard.
+# npx wrangler secret put HEALTH_INGEST_TOKEN
+# npx wrangler secret put HEALTH_INGEST_URL_TOKEN
+
 [vars]
 # IANA zone for timestamps that do not include a numeric offset.
 # Health Auto Export's own timestamps include an offset and do not use this.
