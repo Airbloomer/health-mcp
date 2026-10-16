@@ -10,9 +10,7 @@ import { createNodeStorage, startServer } from "../src/adapters/node.js";
 import { createPostgresStorageFromPool } from "../src/adapters/postgres.js";
 import { applySqliteMigrations } from "../src/adapters/sqlite.js";
 import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, toPostgres, UPSERT_POINT, WORKOUTS_RANGE } from "../src/adapters/statements.js";
-import { expectedSummary, summaryDate } from "./expected.mjs";
-
-const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
+import { expectedSummary, summaryChunk, summaryDate } from "./expected.mjs";
 
 test("migration SQL stays portable", () => {
   const files = migrationFiles();
@@ -54,10 +52,10 @@ test("node sqlite adapter serves ingest and summary over HTTP", async () => {
     const denied = await fetch(`${base}/summary?date=${summaryDate}`);
     assert.equal(denied.status, 401);
 
-    const ingested = await fetch(`${base}/ingest`, {
+    const ingested = await fetch(`${base}/import/apple-health/chunk`, {
       method: "POST",
       headers: { authorization: "Bearer tok", "content-type": "application/json" },
-      body: JSON.stringify(sample),
+      body: JSON.stringify(summaryChunk),
     });
     assert.equal(ingested.status, 200);
     const ingestBody = await ingested.json();
@@ -69,11 +67,19 @@ test("node sqlite adapter serves ingest and summary over HTTP", async () => {
     });
     assert.deepEqual(await summarized.json(), expectedSummary);
 
-    const replaced = structuredClone(sample);
-    replaced.data.metrics.find((metric) => metric.name === "weight_body_mass").data = [
-      { date: "2026-10-14 07:00:00 -0700", qty: 170 },
-    ];
-    const again = await fetch(`${base}/ingest`, {
+    const replaced = {
+      points: [{
+        metric: "weight_body_mass",
+        date: summaryDate,
+        sum_qty: 170,
+        last_qty: 170,
+        last_ts: "2026-10-14 07:00:00 -0700",
+        units: "lb",
+        n: 1,
+      }],
+      workouts: [],
+    };
+    const again = await fetch(`${base}/import/apple-health/chunk`, {
       method: "POST",
       headers: { authorization: "Bearer tok", "content-type": "application/json" },
       body: JSON.stringify(replaced),

@@ -13,13 +13,13 @@ preview_urls = false
 # HEALTH_INGEST_TOKEN and HEALTH_INGEST_URL_TOKEN are Worker secrets, not [vars].
 # Leave HEALTH_INGEST_URL_TOKEN unset unless a phone cannot send Authorization.
 # It must match ^[A-Za-z0-9_-]{32,}$ and must not equal HEALTH_INGEST_TOKEN.
-# It is write-only for POST /ingest/hc-webhook and POST /ingest/life-dashboard.
+# It is write-only for POST /ingest/hc-webhook and POST /ingest/shortcuts.
 # npx wrangler secret put HEALTH_INGEST_TOKEN
 # npx wrangler secret put HEALTH_INGEST_URL_TOKEN
 
 [vars]
 # IANA zone for timestamps that do not include a numeric offset.
-# Health Auto Export's own timestamps include an offset and do not use this.
+# A timestamp that already includes an offset does not use this.
 HEALTH_TIMEZONE = "America/Los_Angeles"
 # Off by default. Set to "true", "1", "yes", or "on" to store each request body.
 # HEALTH_STORE_RAW = "true"

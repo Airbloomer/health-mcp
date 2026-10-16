@@ -6,7 +6,7 @@
 
 ![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
-health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with the Android apps. Your data stays on your server.
+health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with HC Webhook. Your data stays on your server.
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
@@ -14,7 +14,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 
 ## How it works
 
-- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Apple Shortcuts on iPhone, built in with no extra app) posts your health data to your server.
+- **Your phone app sends your data.** HC Webhook on Android, or Apple Shortcuts on iPhone (built in, with no extra app), posts your health data to your server.
 - **Your server keeps it.** health-mcp stores one row per metric per day in a database that you control.
 - **Your chatbot connects.** You add your server to your chatbot as an MCP connector. It can read your data, but never change it.
 
@@ -25,7 +25,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 > - A computer with a terminal
 > - [Node.js](https://nodejs.org) 22 or newer
 > - A free [Cloudflare](https://www.cloudflare.com) account
-> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Apple Shortcuts (iPhone, built in)
+> - The phone app: HC Webhook (Android), or Apple Shortcuts (iPhone, built in)
 > - A chatbot that supports MCP connectors
 > - About 15 minutes
 
@@ -46,7 +46,7 @@ npx wrangler d1 create health-mcp
 
 The last command prints a `database_id`. Open `wrangler.toml` in a text editor and paste that value in place of `replace-with-d1-database-id`. While you are there, change `HEALTH_TIMEZONE` to your own time zone, for example `Europe/Rome`.
 
-Optional, Android only: sleep is not stored by default. To keep sleep from HC Webhook or Life Dashboard Companion, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
+Optional, Android only: sleep is not stored by default. To keep sleep from HC Webhook, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
 
 Then create the database tables. Do this **before** you deploy:
 
@@ -88,32 +88,29 @@ You should get back JSON that starts with `{"date":"2026-01-01"`, with empty val
 ### 3. Connect your phone
 
 <details>
-<summary><strong>Android: HC Webhook or Life Dashboard Companion</strong></summary>
+<summary><strong>Android: HC Webhook</strong></summary>
 
-Both apps read Health Connect, so anything Health Connect already collects (for example from a smart scale or a fitness band app) can be sent. Install one of them, grant it Health Connect read access, and add a webhook:
+HC Webhook reads Health Connect, so anything Health Connect already collects (for example from a smart scale or a fitness band app) can be sent. Install it, grant it Health Connect read access, and add a webhook with URL `https://<your-host>/ingest/hc-webhook` and format JSON.
 
-- **HC Webhook:** URL `https://<your-host>/ingest/hc-webhook`, format JSON.
-- **Life Dashboard Companion:** on the **Health** tab, URL `https://<your-host>/ingest/life-dashboard`. Leave **Daily totals in payload** on.
-
-Then add a header with key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token). Run a sync (in Life Dashboard Companion, tap **Test ping**, then **Sync Now**).
+Then add a header with key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token). Run a sync.
 
 <details>
 <summary>Can't add a header?</summary>
 
-Some setups can't send a header, for example a URL added by QR pairing in Life Dashboard Companion. In that case, create a second, separate token and put it in the URL:
+If this install cannot send a header, create a second, separate token and put it in the URL:
 
 ```bash
 openssl rand -hex 32
 npx wrangler secret put HEALTH_INGEST_URL_TOKEN
 ```
 
-Then use the path form: `https://<your-host>/ingest/hc-webhook/<HEALTH_INGEST_URL_TOKEN>` (or `/ingest/life-dashboard/<HEALTH_INGEST_URL_TOKEN>`).
+Then use the path form: `https://<your-host>/ingest/hc-webhook/<HEALTH_INGEST_URL_TOKEN>`.
 
 > **Security note:** this URL token can only send data, never read it. Still, a URL can end up in logs, history, screenshots and QR codes, and Cloudflare's request logs keep the full URL. Prefer the header when you can. Never put your main `HEALTH_INGEST_TOKEN` in a URL. If the URL may have leaked, run `npx wrangler secret put HEALTH_INGEST_URL_TOKEN` again with a new value. See [Security](https://github.com/Airbloomer/health-mcp/blob/main/docs/security.md).
 
 </details>
 
-Full setup for both apps: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#hc-webhook).
+Full setup: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#hc-webhook).
 
 </details>
 
@@ -124,9 +121,7 @@ Shortcuts is built into iPhone, so there's no extra app to install. A shortcut r
 
 Full setup: [Shortcuts guide](https://github.com/Airbloomer/health-mcp/blob/main/docs/shortcuts.md)
 
-Note: these steps are tested against the server but not yet verified on a device.
-
-Prefer a dedicated app? See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
+Note: these steps are tested against the server but not yet verified on a device. Shortcuts is the only live iPhone path. A one-time export from the Health app is a separate file import, described in [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 
 </details>
 
@@ -179,7 +174,7 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Troubleshooting
 
-- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on three `POST` routes: the two Android webhook routes (`/ingest/hc-webhook`, `/ingest/life-dashboard`) and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
+- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on two `POST` routes: `/ingest/hc-webhook` and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
 - **Sending data fails right after deploying.** Run `npx wrangler d1 migrations apply health-mcp --remote`, then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).

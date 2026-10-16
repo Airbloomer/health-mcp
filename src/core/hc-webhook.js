@@ -66,7 +66,7 @@ const NUTRITION_FIELDS = [
 
 /**
  * HC Webhook JSON: `timestamp`, `app_version`, and snake_case record arrays.
- * Life Dashboard payloads carry `source` and are not this format.
+ * A payload that carries `source` is not this format.
  */
 export function isHcWebhook(body) {
   if (!isPlainObject(body)) return false;

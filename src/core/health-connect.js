@@ -7,8 +7,8 @@ import { localDate } from "./parse.js";
  * The string keys match AndroidX EXERCISE_TYPE_STRING_TO_INT_MAP, and the
  * last name written for an id is the one toString()-style reverse map keeps
  * (`calisthenics`, `high_intensity_interval_training`, `strength_training`).
- * HC Webhook sends `exerciseType.toString()` (the decimal). Life Dashboard
- * Companion sends that decimal as a string; its iOS app sends the name.
+ * HC Webhook sends `exerciseType.toString()` (the decimal). Shortcuts sends
+ * the exercise name.
  */
 const EXERCISE_TYPES = [
   ["back_extension", 13],
@@ -204,7 +204,7 @@ function titleFromSnake(name) {
     .join(" ");
 }
 
-/** `+HH:MM` / `-HH:MM` as stored on Life Dashboard record metadata. */
+/** `+HH:MM` / `-HH:MM` applied when a record carries a zone offset and the timestamp does not. */
 function offsetTimestamp(iso, offset) {
   if (typeof offset !== "string" || !/^[+-](?:0\d|1[0-4]):[0-5]\d$/.test(offset)) return null;
   const instant = new Date(iso);
@@ -219,7 +219,7 @@ function offsetTimestamp(iso, offset) {
 /**
  * Calendar day for a Health Connect instant.
  * A numeric offset already in the timestamp wins, matching the other adapters.
- * Otherwise a Life Dashboard zone offset is applied, then `HEALTH_TIMEZONE`.
+ * Otherwise an optional zone offset is applied, then `HEALTH_TIMEZONE`.
  */
 export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null, now = new Date()) {
   if (typeof iso !== "string" || !iso) return null;
@@ -230,15 +230,6 @@ export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null, no
   const date = localDate(ts, timeZone || DEFAULT_TIME_ZONE);
   if (!dateInWindow(date, now, timeZone || DEFAULT_TIME_ZONE)) return null;
   return { ts, date };
-}
-
-export function recordOffset(record, which = "start") {
-  const meta = record?.metadata;
-  if (!isPlainObject(meta)) return null;
-  const value = which === "end"
-    ? meta.end_zone_offset || meta.start_zone_offset || meta.zone_offset
-    : meta.zone_offset || meta.start_zone_offset || meta.end_zone_offset;
-  return typeof value === "string" ? value : null;
 }
 
 export function addQuantity(points, metric, qty, units, stamp) {
@@ -271,10 +262,3 @@ export function intervalKey(startTs, endTs) {
   return endTs && endTs !== startTs ? `${startTs}/${endTs}` : startTs;
 }
 
-export function unitsFromKey(key) {
-  if (key.endsWith("_mcg")) return "mcg";
-  if (key.endsWith("_mg")) return "mg";
-  if (key.endsWith("_kcal")) return "kcal";
-  if (key.endsWith("_g") || key.endsWith("_grams")) return "g";
-  return null;
-}

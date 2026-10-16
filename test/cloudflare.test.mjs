@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
-import fs from "node:fs";
 import { test } from "node:test";
 import { D1Storage } from "../src/adapters/d1.js";
 import { applySqliteMigrations } from "../src/adapters/sqlite.js";
 import { D1_BATCH_LIMIT } from "../src/adapters/statements.js";
 import { LATEST_METRICS, SUM_METRICS } from "../src/core/metrics.js";
 import worker from "../src/index.js";
-import { expectedSummary, summaryDate } from "./expected.mjs";
-
-const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
+import { expectedSummary, summaryChunk, summaryDate } from "./expected.mjs";
 
 function d1FromSqlite(db, writes) {
   function statement(sql, params = []) {
@@ -48,33 +45,36 @@ function d1FromSqlite(db, writes) {
   };
 }
 
-function sevenDayPayload() {
-  const names = [
-    ...Object.keys(SUM_METRICS),
-    ...Object.keys(LATEST_METRICS),
-    ...Array.from({ length: 40 }, (_, index) => `extra_metric_${index}`),
+function sevenDayExport() {
+  const types = [
+    ["HKQuantityTypeIdentifierDietaryEnergyConsumed", "kcal"],
+    ["HKQuantityTypeIdentifierDietaryProtein", "g"],
+    ["HKQuantityTypeIdentifierDietaryCarbohydrates", "g"],
+    ["HKQuantityTypeIdentifierDietaryFatTotal", "g"],
+    ["HKQuantityTypeIdentifierActiveEnergyBurned", "kcal"],
+    ["HKQuantityTypeIdentifierBasalEnergyBurned", "kcal"],
+    ["HKQuantityTypeIdentifierStepCount", "count"],
+    ["HKQuantityTypeIdentifierBodyMass", "lb"],
+    ["HKQuantityTypeIdentifierBodyFatPercentage", "%"],
   ];
-  const metrics = names.map((name) => {
-    const data = [];
-    for (let day = 0; day < 7; day++) {
-      const date = `2026-10-${String(8 + day).padStart(2, "0")}`;
-      for (let slot = 0; slot < 48; slot++) {
-        const hour = String(Math.floor(slot / 2)).padStart(2, "0");
-        const minute = slot % 2 ? "30" : "00";
-        data.push({ date: `${date} ${hour}:${minute}:00 -0700`, qty: 1 });
-      }
-    }
-    return { name, units: name === "weight_body_mass" ? "lb" : "count", data };
-  });
-  const workouts = [];
+  const slots = 160;
+  let records = "";
+  let sampleCount = 0;
   for (let day = 0; day < 7; day++) {
     const date = `2026-10-${String(8 + day).padStart(2, "0")}`;
-    workouts.push(
-      { name: "Walk", start: `${date} 08:00:00 -0700`, duration: 1800, activeEnergyBurned: { qty: 100, units: "kcal" } },
-      { name: "Run", start: `${date} 18:00:00 -0700`, duration: 1800, activeEnergyBurned: { qty: 200, units: "kcal" } },
-    );
+    for (const [type, unit] of types) {
+      for (let slot = 0; slot < slots; slot++) {
+        const hour = String(Math.floor(slot / 60)).padStart(2, "0");
+        const minute = String(slot % 60).padStart(2, "0");
+        records += `<Record type="${type}" unit="${unit}" value="1" startDate="${date} ${hour}:${minute}:00 -0700" endDate="${date} ${hour}:${minute}:00 -0700"/>`;
+        sampleCount += 1;
+      }
+    }
+    records += `<Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min" value="60" startDate="${date} 09:00:00 -0700" endDate="${date} 09:00:00 -0700"/>`;
+    records += `<Workout workoutActivityType="HKWorkoutActivityTypeWalking" duration="30" durationUnit="min" startDate="${date} 08:00:00 -0700" endDate="${date} 08:30:00 -0700" totalEnergyBurned="100" totalEnergyBurnedUnit="kcal"/>`;
+    records += `<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" durationUnit="min" startDate="${date} 18:00:00 -0700" endDate="${date} 18:30:00 -0700" totalEnergyBurned="200" totalEnergyBurnedUnit="kcal"/>`;
   }
-  return { data: { metrics, workouts } };
+  return { xml: `<HealthData>${records}</HealthData>`, sampleCount };
 }
 
 test("cloudflare adapter ingests and summarizes through D1", async () => {
@@ -85,13 +85,13 @@ test("cloudflare adapter ingests and summarizes through D1", async () => {
   const denied = await worker.fetch(new Request(`http://example.test/summary?date=${summaryDate}`), env);
   assert.equal(denied.status, 401);
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await worker.fetch(new Request("http://example.test/import/apple-health/chunk", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
-    body: JSON.stringify(sample),
+    body: JSON.stringify(summaryChunk),
   }), env);
   assert.equal(ingested.status, 200);
-  assert.equal((await ingested.json()).points, 11);
+  assert.equal((await ingested.json()).points, 10);
 
   const summarized = await worker.fetch(
     new Request(`http://example.test/summary?date=${summaryDate}`, { headers: { authorization: "Bearer tok" } }),
@@ -138,13 +138,13 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   applySqliteMigrations(db);
   const writes = { n: 0 };
   const env = { DB: d1FromSqlite(db, writes), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
-  const payload = sevenDayPayload();
-  const sampleCount = payload.data.metrics.reduce((sum, metric) => sum + metric.data.length, 0);
+  const payload = sevenDayExport();
+  const sampleCount = payload.sampleCount;
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await worker.fetch(new Request("http://example.test/import/apple-health", {
     method: "POST",
-    headers: { authorization: "Bearer tok", "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: { authorization: "Bearer tok", "content-type": "application/xml" },
+    body: payload.xml,
   }), env);
   assert.equal(ingested.status, 200);
   const body = await ingested.json();
@@ -153,7 +153,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   assert.ok(writes.n < 200, `wrote ${writes.n} rows`);
 
   const storedMetrics = db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n;
-  const extras = db.prepare("SELECT COUNT(*) AS n FROM points_daily WHERE metric LIKE 'extra_metric_%'").get().n;
+  const extras = db.prepare("SELECT COUNT(*) AS n FROM points_daily WHERE metric = 'heart_rate'").get().n;
   const workouts = db.prepare("SELECT COUNT(*) AS n FROM workouts").get().n;
   assert.equal(extras, 0);
   assert.equal(storedMetrics, 7 * (Object.keys(SUM_METRICS).length + Object.keys(LATEST_METRICS).length));
@@ -165,14 +165,14 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
     env,
   )).json();
-  assert.equal(day.steps, 48);
+  assert.equal(day.steps, 160);
   assert.equal(day.workouts.length, 2);
 
   const before = writes.n;
-  const again = await worker.fetch(new Request("http://example.test/ingest", {
+  const again = await worker.fetch(new Request("http://example.test/import/apple-health", {
     method: "POST",
-    headers: { authorization: "Bearer tok", "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: { authorization: "Bearer tok", "content-type": "application/xml" },
+    body: payload.xml,
   }), env);
   assert.equal(again.status, 200);
   assert.ok(writes.n - before < 200);
@@ -180,7 +180,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
     env,
   )).json();
-  assert.equal(retried.steps, 48);
+  assert.equal(retried.steps, 160);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, storedMetrics);
   db.close();
 });
@@ -189,31 +189,35 @@ test("a partial re-send does not overwrite the full-day total", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
-  const post = (body) => worker.fetch(new Request("http://example.test/ingest", {
+  const post = (body) => worker.fetch(new Request("http://example.test/import/apple-health/chunk", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
     body: JSON.stringify(body),
   }), env);
   const full = await post({
-    data: {
-      metrics: [{
-        name: "step_count",
-        units: "count",
-        data: [
-          { date: "2026-10-14 08:00:00 -0700", qty: 1000 },
-          { date: "2026-10-14 12:00:00 -0700", qty: 2000 },
-          { date: "2026-10-14 18:00:00 -0700", qty: 3000 },
-        ],
-      }],
-    },
+    points: [{
+      metric: "step_count",
+      date: "2026-10-14",
+      sum_qty: 6000,
+      last_qty: 3000,
+      last_ts: "2026-10-14 18:00:00 -0700",
+      units: "count",
+      n: 3,
+    }],
+    workouts: [],
   });
   assert.equal(full.status, 200);
   const partial = await post({
-    data: {
-      metrics: [
-        { name: "step_count", units: "count", data: [{ date: "2026-10-14 08:00:00 -0700", qty: 5 }] },
-      ],
-    },
+    points: [{
+      metric: "step_count",
+      date: "2026-10-14",
+      sum_qty: 5,
+      last_qty: 5,
+      last_ts: "2026-10-14 08:00:00 -0700",
+      units: "count",
+      n: 1,
+    }],
+    workouts: [],
   });
   assert.equal(partial.status, 200);
   const summary = await (await worker.fetch(
@@ -274,10 +278,10 @@ test("cloudflare adapter serves the read-only MCP tools", async () => {
   }), { ...env, MCP_ALLOWED_ORIGINS: "https://example.com" });
   assert.equal(allowed.status, 200);
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await worker.fetch(new Request("http://example.test/import/apple-health/chunk", {
     method: "POST",
     headers,
-    body: JSON.stringify(sample),
+    body: JSON.stringify(summaryChunk),
   }), env);
   assert.equal(ingested.status, 200);
 
