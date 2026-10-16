@@ -7,7 +7,7 @@ import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
 import { DEFAULT_TIME_ZONE, MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "./metrics.js";
 import { localDate, parse, payloadError } from "./parse.js";
-import { parseShortcuts, shortcutsError } from "./shortcuts.js";
+import { parseShortcuts, shortcutDays, shortcutsError, shortcutsSourcePriority } from "./shortcuts.js";
 import { parseSyncFit, syncFitError } from "./syncfit.js";
 
 export function json(body, status = 200) {
@@ -38,7 +38,7 @@ function adapterOptions(ctx) {
 
 /**
  * @param {Request} req
- * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], storage: { insertIngest: Function, queryDaySummary: Function, queryMetricRange: Function, listMetrics: Function, listWorkouts: Function }, now?: Date }} ctx
+ * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, shortcutsSourcePriority?: string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], storage: { insertIngest: Function, queryDaySummary: Function, queryMetricRange: Function, listMetrics: Function, listWorkouts: Function }, now?: Date }} ctx
  */
 export async function handleRequest(req, ctx) {
   const url = new URL(req.url);
@@ -60,7 +60,7 @@ export async function handleRequest(req, ctx) {
   return json({ error: "not_found" }, 404);
 }
 
-async function storeIngest(ctx, { points, workouts, samples, bytes, payload }) {
+async function storeIngest(ctx, { points, workouts, samples, bytes, payload, extra }) {
   const timeZone = resolveTimeZone(ctx.timeZone);
   const now = ctx.now instanceof Date ? ctx.now : new Date();
   const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])].sort();
@@ -78,7 +78,7 @@ async function storeIngest(ctx, { points, workouts, samples, bytes, payload }) {
     points,
     workouts,
   });
-  return json({ ok: true, id, dates, points: samples, workouts: workouts.length });
+  return json({ ok: true, id, dates, points: samples, workouts: workouts.length, ...extra });
 }
 
 async function* limitBytes(stream, limit) {
@@ -221,8 +221,19 @@ async function ingestShortcuts(req, ctx) {
     return json({ error: "invalid_json" }, 400);
   }
   const options = adapterOptions(ctx);
-  if (shortcutsError(body, options)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseShortcuts(body, options), text);
+  const error = shortcutsError(body, options);
+  if (error) return json(error, 400);
+  const parsed = parseShortcuts(body, options);
+  const allow = storedMetricSet(ctx.metricAllowlist);
+  const kept = parsed.points.filter((point) => allow.has(point.metric));
+  return storeIngest(ctx, {
+    points: shortcutDays(kept, shortcutsSourcePriority(ctx.shortcutsSourcePriority)),
+    workouts: parsed.workouts,
+    samples: kept.length,
+    bytes: text.length,
+    payload: text,
+    extra: { dropped: parsed.points.length - kept.length },
+  });
 }
 
 async function storeParsed(ctx, parsed, text) {

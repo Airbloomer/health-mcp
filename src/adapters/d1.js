@@ -7,6 +7,7 @@ import {
   METRIC_RANGE,
   POINTS_FOR_DATE,
   UPSERT_POINT,
+  REPLACE_POINT,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
   WORKOUTS_RANGE,
@@ -28,7 +29,7 @@ export class D1Storage {
     }
     for (const point of batch.points) {
       statements.push(
-        this.db.prepare(UPSERT_POINT).bind(
+        this.db.prepare(point.replace ? REPLACE_POINT : UPSERT_POINT).bind(
           point.date,
           point.metric,
           point.sum_qty,
