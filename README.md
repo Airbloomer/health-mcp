@@ -4,7 +4,7 @@
 
 *Self-hosted · read-only MCP · iPhone and Android*
 
-Ask your AI chatbot about your own health data. health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option on Android. It runs on a small server that you own, so your data stays with you.
+Ask your AI chatbot about your own health data. health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option on Android or SyncFit. It runs on a small server that you own, so your data stays with you.
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
@@ -42,7 +42,7 @@ npx wrangler d1 create health-mcp
 
 The last command prints a `database_id`. Open `wrangler.toml` in a text editor and paste that value in place of `replace-with-d1-database-id`. While you are there, change `HEALTH_TIMEZONE` to your own time zone, for example `Europe/Rome`.
 
-Optional, Android only: sleep is not stored by default. To keep sleep duration from HC Webhook or Life Dashboard Companion, add `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"` under `[vars]` in `wrangler.toml`.
+Optional, Android or SyncFit: sleep is not stored by default. To keep sleep from HC Webhook, Life Dashboard Companion, or SyncFit, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
 
 Then create the database tables. Do this **before** you deploy:
 
@@ -167,10 +167,10 @@ Start a new chat with the connector turned on and ask:
 
 - "How did I train this week?"
 - "How many steps did I take yesterday?"
-- "How did I sleep this week?" (Android, with sleep enabled)
+- "How did I sleep this week?" (Android or SyncFit, with sleep enabled)
 - "Show my weight over the last 30 days."
 
-Your data appears only after the phone app's first sync. The sleep question works only on Android, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
+Your data appears only after the phone app's first sync. The sleep question works only with Android or SyncFit, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
 
 ✅ **Checkpoint:** the chatbot calls a health-mcp tool and answers with your numbers.
 
