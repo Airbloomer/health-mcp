@@ -108,6 +108,80 @@ export function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+/** Inclusive bounds for values these adapters store. */
+export const STEP_RANGE = [0, 1_000_000];
+export const ENERGY_KCAL_RANGE = [0, 100_000];
+export const WEIGHT_KG_RANGE = [0.5, 500];
+export const BODY_FAT_PCT_RANGE = [0, 100];
+export const DISTANCE_M_RANGE = [0, 1_000_000];
+export const MASS_G_RANGE = [0, 100_000];
+
+const CALENDAR_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DATE_MIN = "2000-01-01";
+const FUTURE_DAYS = 2;
+
+export function inRange(value, min, max) {
+  return finiteNumber(value) && value >= min && value <= max;
+}
+
+/** True when `value` is a real `YYYY-MM-DD` calendar date, not merely four-two-two digits. */
+export function realCalendarDate(value) {
+  if (typeof value !== "string") return false;
+  const match = CALENDAR_RE.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** Latest calendar day that may be stored: two days after `now`, in `timeZone`. */
+export function latestStoredDate(now = new Date(), timeZone = DEFAULT_TIME_ZONE) {
+  const end = new Date(now.getTime() + FUTURE_DAYS * 24 * 60 * 60 * 1000);
+  return localDate(end.toISOString(), timeZone || DEFAULT_TIME_ZONE);
+}
+
+/** Real calendar dates from 2000-01-01 through two days after `now`. */
+export function dateInWindow(value, now = new Date(), timeZone = DEFAULT_TIME_ZONE) {
+  if (!realCalendarDate(value)) return false;
+  if (value < DATE_MIN) return false;
+  const latest = latestStoredDate(now, timeZone);
+  return realCalendarDate(latest) && value <= latest;
+}
+
+export function clockOptions(options = {}) {
+  return {
+    timeZone: options.timeZone || DEFAULT_TIME_ZONE,
+    now: options.now instanceof Date && !Number.isNaN(options.now.getTime()) ? options.now : new Date(),
+  };
+}
+
+export function rangesOk(records, ranges) {
+  if (records == null) return true;
+  if (!Array.isArray(records)) return false;
+  return records.every((record) => isPlainObject(record) && Object.entries(ranges).every(([key, bounds]) => {
+    if (record[key] == null) return true;
+    return inRange(record[key], bounds[0], bounds[1]);
+  }));
+}
+
+/** Top-level timestamp and `date` fields must fall in the storage window. */
+export function timesInWindow(record, ctx, offsetFor) {
+  if (!isPlainObject(record)) return false;
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value !== "string") continue;
+    if (key === "date") {
+      if (!dateInWindow(value, ctx.now, ctx.timeZone)) return false;
+      continue;
+    }
+    if (key !== "bucket_start" && key !== "bucket_end" && !key.endsWith("time")) continue;
+    const offset = offsetFor ? offsetFor(record, key) : null;
+    if (!datedSample(value, ctx.timeZone, offset, ctx.now)) return false;
+  }
+  return true;
+}
+
 export function exerciseName(type) {
   if (typeof type === "number" && Number.isInteger(type)) {
     const name = EXERCISE_BY_INT.get(type);
@@ -147,12 +221,14 @@ function offsetTimestamp(iso, offset) {
  * A numeric offset already in the timestamp wins, matching the other adapters.
  * Otherwise a Life Dashboard zone offset is applied, then `HEALTH_TIMEZONE`.
  */
-export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null) {
+export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null, now = new Date()) {
   if (typeof iso !== "string" || !iso) return null;
+  const written = /^(\d{4}-\d{2}-\d{2})/.exec(iso.trim());
+  if (!written || !realCalendarDate(written[1])) return null;
   const hasOffset = /[+-]\d{2}:?\d{2}$/.test(iso);
   const ts = !hasOffset && offset ? offsetTimestamp(iso, offset) || iso : iso;
   const date = localDate(ts, timeZone || DEFAULT_TIME_ZONE);
-  if (!date) return null;
+  if (!dateInWindow(date, now, timeZone || DEFAULT_TIME_ZONE)) return null;
   return { ts, date };
 }
 
@@ -171,9 +247,9 @@ export function addQuantity(points, metric, qty, units, stamp) {
   points.push({ metric, ts: stamp.ts, date: stamp.date, units: converted.units, qty: converted.qty });
 }
 
-export function workoutFromSession(record, timeZone, offset) {
+export function workoutFromSession(record, timeZone, offset, now = new Date()) {
   if (!isPlainObject(record) || typeof record.start_time !== "string") return null;
-  const stamp = datedSample(record.start_time, timeZone, offset);
+  const stamp = datedSample(record.start_time, timeZone, offset, now);
   if (!stamp) return null;
   let seconds = finiteNumber(record.duration_seconds) ? record.duration_seconds : null;
   if (seconds == null && typeof record.end_time === "string") {

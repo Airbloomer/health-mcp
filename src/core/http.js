@@ -27,6 +27,13 @@ function resolveTimeZone(value) {
   return zone || DEFAULT_TIME_ZONE;
 }
 
+function adapterOptions(ctx) {
+  return {
+    timeZone: resolveTimeZone(ctx.timeZone),
+    now: ctx.now instanceof Date ? ctx.now : new Date(),
+  };
+}
+
 /**
  * @param {Request} req
  * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], storage: { insertIngest: Function, queryDaySummary: Function, queryMetricRange: Function, listMetrics: Function, listWorkouts: Function }, now?: Date }} ctx
@@ -134,11 +141,12 @@ async function ingest(req, ctx) {
     return json({ error: "invalid_json" }, 400);
   }
   const timeZone = resolveTimeZone(ctx.timeZone);
+  const healthConnect = adapterOptions(ctx);
   if (!healthExportProError(body)) return storeParsed(ctx, parseHealthExportPro(body, { timeZone }), text);
   if (body?.data == null && !syncFitError(body)) return storeParsed(ctx, parseSyncFit(body, { timeZone }), text);
-  if (!lifeDashboardError(body)) return storeParsed(ctx, parseLifeDashboard(body, { timeZone }), text);
+  if (!lifeDashboardError(body, healthConnect)) return storeParsed(ctx, parseLifeDashboard(body, healthConnect), text);
   if (isLifeDashboard(body)) return json({ error: "invalid_payload" }, 400);
-  if (!hcWebhookError(body)) return storeParsed(ctx, parseHcWebhook(body, { timeZone }), text);
+  if (!hcWebhookError(body, healthConnect)) return storeParsed(ctx, parseHcWebhook(body, healthConnect), text);
   if (isHcWebhook(body)) return json({ error: "invalid_payload" }, 400);
   if (payloadError(body)) return json({ error: "invalid_payload" }, 400);
   return storeParsed(ctx, parse(body, { timeZone }), text);
@@ -166,8 +174,9 @@ async function ingestHcWebhook(req, ctx) {
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-  if (hcWebhookError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseHcWebhook(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
+  const healthConnect = adapterOptions(ctx);
+  if (hcWebhookError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
+  return storeParsed(ctx, parseHcWebhook(body, healthConnect), text);
 }
 
 async function ingestLifeDashboard(req, ctx) {
@@ -179,8 +188,9 @@ async function ingestLifeDashboard(req, ctx) {
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-  if (lifeDashboardError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseLifeDashboard(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
+  const healthConnect = adapterOptions(ctx);
+  if (lifeDashboardError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
+  return storeParsed(ctx, parseLifeDashboard(body, healthConnect), text);
 }
 
 async function ingestSyncFit(req, ctx) {

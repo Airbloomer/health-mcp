@@ -1,10 +1,19 @@
 import { DEFAULT_TIME_ZONE } from "./metrics.js";
 import {
   addQuantity,
+  BODY_FAT_PCT_RANGE,
+  clockOptions,
   datedSample,
+  DISTANCE_M_RANGE,
+  ENERGY_KCAL_RANGE,
   finiteNumber,
   intervalKey,
   isPlainObject,
+  MASS_G_RANGE,
+  rangesOk,
+  STEP_RANGE,
+  timesInWindow,
+  WEIGHT_KG_RANGE,
   workoutFromSession,
 } from "./health-connect.js";
 
@@ -84,8 +93,9 @@ function stringField(record, key, required) {
 }
 
 /** Null when `body` is an HC Webhook document. Otherwise "invalid_payload". */
-export function hcWebhookError(body) {
+export function hcWebhookError(body, options = {}) {
   if (!isHcWebhook(body)) return "invalid_payload";
+  const ctx = clockOptions(options);
   for (const key of RECORD_KEYS) {
     if (body[key] != null && !recordsOk(body[key])) return "invalid_payload";
   }
@@ -120,7 +130,32 @@ export function hcWebhookError(body) {
   if (!integerFieldOk(body.ovulation_test, "result")) return "invalid_payload";
   if (!integerFieldOk(body.cervical_mucus, "appearance")) return "invalid_payload";
   if (!integerFieldOk(body.sexual_activity, "protection_used")) return "invalid_payload";
+  if (!recordsInWindow(body, ctx)) return "invalid_payload";
+  if (!rangesOk(body.steps, { count: STEP_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.distance, { meters: DISTANCE_M_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.active_calories, { calories: ENERGY_KCAL_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.total_calories, { calories: ENERGY_KCAL_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.weight, { kilograms: WEIGHT_KG_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.body_fat, { percentage: BODY_FAT_PCT_RANGE })) return "invalid_payload";
+  if (!nutritionRangesOk(body.nutrition)) return "invalid_payload";
   return null;
+}
+
+function recordsInWindow(body, ctx) {
+  for (const key of RECORD_KEYS) {
+    if (!Array.isArray(body[key])) continue;
+    if (body[key].some((record) => !timesInWindow(record, ctx))) return false;
+  }
+  return true;
+}
+
+function nutritionRangesOk(records) {
+  if (records == null) return true;
+  return records.every((record) => NUTRITION_FIELDS.every(([key, , units]) => {
+    if (record[key] == null) return true;
+    const bounds = units === "kcal" ? ENERGY_KCAL_RANGE : MASS_G_RANGE;
+    return finiteNumber(record[key]) && record[key] >= bounds[0] && record[key] <= bounds[1];
+  }));
 }
 
 function arrayFieldsOk(records, numbers, strings) {
@@ -212,15 +247,15 @@ function integerFieldOk(records, key) {
   return records.every((record) => numberField(record, key, true) && stringField(record, "time", true) && metadataOk(record));
 }
 
-function stampInterval(record, timeZone) {
-  const start = datedSample(record.start_time, timeZone);
+function stampInterval(record, timeZone, now) {
+  const start = datedSample(record.start_time, timeZone, null, now);
   if (!start) return null;
-  const end = typeof record.end_time === "string" ? datedSample(record.end_time, timeZone) : null;
+  const end = typeof record.end_time === "string" ? datedSample(record.end_time, timeZone, null, now) : null;
   return { ts: intervalKey(start.ts, end?.ts), date: start.date };
 }
 
-function stampInstant(record, timeZone) {
-  return datedSample(record.time, timeZone);
+function stampInstant(record, timeZone, now) {
+  return datedSample(record.time, timeZone, null, now);
 }
 
 /**
@@ -231,51 +266,51 @@ function stampInstant(record, timeZone) {
  * @param {{ timeZone?: string }} [options]
  */
 export function parseHcWebhook(body, options = {}) {
-  const timeZone = options.timeZone || DEFAULT_TIME_ZONE;
+  const { timeZone, now } = clockOptions(options);
   const points = [];
   const workouts = [];
   if (!isPlainObject(body)) return { points, workouts };
 
-  for (const record of body.steps || []) addQuantity(points, "step_count", record.count, "count", stampInterval(record, timeZone));
-  for (const record of body.distance || []) addQuantity(points, "distance", record.meters, "m", stampInterval(record, timeZone));
-  for (const record of body.active_calories || []) addQuantity(points, "active_energy", record.calories, "kcal", stampInterval(record, timeZone));
-  for (const record of body.total_calories || []) addQuantity(points, "total_calories", record.calories, "kcal", stampInterval(record, timeZone));
-  for (const record of body.hydration || []) addQuantity(points, "dietary_water", record.liters, "L", stampInterval(record, timeZone));
-  for (const record of body.weight || []) addQuantity(points, "weight_body_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.height || []) addQuantity(points, "height", record.meters, "m", stampInstant(record, timeZone));
-  for (const record of body.body_fat || []) addQuantity(points, "body_fat_percentage", record.percentage, "%", stampInstant(record, timeZone));
-  for (const record of body.lean_body_mass || []) addQuantity(points, "lean_body_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.bone_mass || []) addQuantity(points, "bone_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.body_water_mass || []) addQuantity(points, "body_water_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.bmi || []) addQuantity(points, "body_mass_index", record.value, "kg/m2", stampInstant(record, timeZone));
-  for (const record of body.vo2_max || []) addQuantity(points, "vo2_max", record.ml_per_kg_per_min, "mL/kg/min", stampInstant(record, timeZone));
-  for (const record of body.basal_metabolic_rate || []) addQuantity(points, "basal_metabolic_rate", record.watts, "W", stampInstant(record, timeZone));
-  for (const record of body.resting_heart_rate || []) addQuantity(points, "resting_heart_rate", record.bpm, "count/min", stampInstant(record, timeZone));
-  for (const record of body.body_temperature || []) addQuantity(points, "body_temperature", record.celsius, "degC", stampInstant(record, timeZone));
-  for (const record of body.basal_body_temperature || []) addQuantity(points, "basal_body_temperature", record.celsius, "degC", stampInstant(record, timeZone));
-  for (const record of body.blood_glucose || []) addQuantity(points, "blood_glucose", record.mmol_per_liter, "mmol/L", stampInstant(record, timeZone));
-  pushSeries(points, body.heart_rate, "heart_rate", "bpm", "count/min", timeZone);
-  pushSeries(points, body.heart_rate_variability, "heart_rate_variability", "rmssd_millis", "ms", timeZone);
-  pushSeries(points, body.oxygen_saturation, "oxygen_saturation", "percentage", "%", timeZone);
-  pushSeries(points, body.respiratory_rate, "respiratory_rate", "rate", "count/min", timeZone);
+  for (const record of body.steps || []) addQuantity(points, "step_count", record.count, "count", stampInterval(record, timeZone, now));
+  for (const record of body.distance || []) addQuantity(points, "distance", record.meters, "m", stampInterval(record, timeZone, now));
+  for (const record of body.active_calories || []) addQuantity(points, "active_energy", record.calories, "kcal", stampInterval(record, timeZone, now));
+  for (const record of body.total_calories || []) addQuantity(points, "total_calories", record.calories, "kcal", stampInterval(record, timeZone, now));
+  for (const record of body.hydration || []) addQuantity(points, "dietary_water", record.liters, "L", stampInterval(record, timeZone, now));
+  for (const record of body.weight || []) addQuantity(points, "weight_body_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.height || []) addQuantity(points, "height", record.meters, "m", stampInstant(record, timeZone, now));
+  for (const record of body.body_fat || []) addQuantity(points, "body_fat_percentage", record.percentage, "%", stampInstant(record, timeZone, now));
+  for (const record of body.lean_body_mass || []) addQuantity(points, "lean_body_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.bone_mass || []) addQuantity(points, "bone_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.body_water_mass || []) addQuantity(points, "body_water_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.bmi || []) addQuantity(points, "body_mass_index", record.value, "kg/m2", stampInstant(record, timeZone, now));
+  for (const record of body.vo2_max || []) addQuantity(points, "vo2_max", record.ml_per_kg_per_min, "mL/kg/min", stampInstant(record, timeZone, now));
+  for (const record of body.basal_metabolic_rate || []) addQuantity(points, "basal_metabolic_rate", record.watts, "W", stampInstant(record, timeZone, now));
+  for (const record of body.resting_heart_rate || []) addQuantity(points, "resting_heart_rate", record.bpm, "count/min", stampInstant(record, timeZone, now));
+  for (const record of body.body_temperature || []) addQuantity(points, "body_temperature", record.celsius, "degC", stampInstant(record, timeZone, now));
+  for (const record of body.basal_body_temperature || []) addQuantity(points, "basal_body_temperature", record.celsius, "degC", stampInstant(record, timeZone, now));
+  for (const record of body.blood_glucose || []) addQuantity(points, "blood_glucose", record.mmol_per_liter, "mmol/L", stampInstant(record, timeZone, now));
+  pushSeries(points, body.heart_rate, "heart_rate", "bpm", "count/min", timeZone, now);
+  pushSeries(points, body.heart_rate_variability, "heart_rate_variability", "rmssd_millis", "ms", timeZone, now);
+  pushSeries(points, body.oxygen_saturation, "oxygen_saturation", "percentage", "%", timeZone, now);
+  pushSeries(points, body.respiratory_rate, "respiratory_rate", "rate", "count/min", timeZone, now);
   for (const record of body.skin_temperature || []) {
     const qty = finiteNumber(record.avg_delta_celsius) ? record.avg_delta_celsius : record.delta_celsius;
-    addQuantity(points, "skin_temperature", qty, "degC", stampInstant(record, timeZone));
+    addQuantity(points, "skin_temperature", qty, "degC", stampInstant(record, timeZone, now));
   }
   for (const record of body.blood_pressure || []) {
-    const stamp = stampInstant(record, timeZone);
+    const stamp = stampInstant(record, timeZone, now);
     addQuantity(points, "blood_pressure_systolic", record.systolic, "mmHg", stamp);
     addQuantity(points, "blood_pressure_diastolic", record.diastolic, "mmHg", stamp);
   }
   for (const record of body.sleep || []) {
-    addQuantity(points, "sleep_analysis", record.duration_seconds, "s", datedSample(record.session_end_time, timeZone));
+    addQuantity(points, "sleep_analysis", record.duration_seconds, "s", datedSample(record.session_end_time, timeZone, null, now));
   }
   for (const record of body.exercise || []) {
-    const workout = workoutFromSession(record, timeZone);
+    const workout = workoutFromSession(record, timeZone, null, now);
     if (workout) workouts.push(workout);
   }
   for (const record of body.nutrition || []) {
-    const stamp = stampInterval(record, timeZone);
+    const stamp = stampInterval(record, timeZone, now);
     for (const [key, metric, units] of NUTRITION_FIELDS) {
       if (finiteNumber(record[key])) addQuantity(points, metric, record[key], units, stamp);
     }
@@ -286,7 +321,7 @@ export function parseHcWebhook(body, options = {}) {
     ["cervical_mucus", "appearance"],
     ["sexual_activity", "protection_used"],
   ]) {
-    for (const record of body[key] || []) addQuantity(points, key, record[field], null, stampInstant(record, timeZone));
+    for (const record of body[key] || []) addQuantity(points, key, record[field], null, stampInstant(record, timeZone, now));
   }
 
   return {
@@ -295,9 +330,9 @@ export function parseHcWebhook(body, options = {}) {
   };
 }
 
-function pushSeries(points, records, metric, sampleKey, units, timeZone) {
+function pushSeries(points, records, metric, sampleKey, units, timeZone, now) {
   for (const record of records || []) {
     const qty = finiteNumber(record.avg) ? record.avg : record[sampleKey];
-    addQuantity(points, metric, qty, units, stampInstant(record, timeZone));
+    addQuantity(points, metric, qty, units, stampInstant(record, timeZone, now));
   }
 }

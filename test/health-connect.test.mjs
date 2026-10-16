@@ -253,20 +253,51 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   const life = await handleRequest(request("/ingest/life-dashboard/url-secret", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: "url-secret" }));
   assert.equal(life.status, 200);
 
-  const summaryUrl = await handleRequest(request(`/summary?date=${summaryDate}&token=url-secret`, { method: "GET", token: "" }), environment);
-  assert.equal(summaryUrl.status, 401);
+  const wrongBearer = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { token: "nope", body: "{}" }), environment);
+  assert.equal(wrongBearer.status, 401);
+  const encoded = await handleRequest(request("/ingest/life-dashboard?%74oken=url-secret", { token: "", body: JSON.stringify(lifeBody({ steps: 4, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: "url-secret" }));
+  assert.equal(encoded.status, 200);
+  assert.equal(redactRequestTarget("POST /ingest/hc-webhook?%74oken=s3cret-value failed", "s3cret-value").includes("s3cret-value"), false);
+  assert.equal(
+    redactRequestTarget("POST /ingest/hc-webhook?%74oken=s3cret-value failed", "s3cret-value"),
+    "POST /ingest/hc-webhook?token=[redacted] failed",
+  );
+  assert.equal(redactRequestTarget("POST /ingest/hc-webhook?%2574oken=s3cret-value", "s3cret-value").includes("s3cret-value"), false);
+
+  const denied = [
+    ["GET", `/summary?date=${summaryDate}&token=url-secret`],
+    ["POST", `/summary?date=${summaryDate}&token=url-secret`],
+    ["GET", `/summary?date=${summaryDate}&token=tok`],
+    ["GET", "/mcp?token=url-secret"],
+    ["POST", "/mcp?token=url-secret"],
+    ["DELETE", "/mcp?token=url-secret"],
+    ["GET", "/ingest?token=url-secret"],
+    ["POST", "/ingest?token=url-secret"],
+    ["PUT", "/ingest?token=url-secret"],
+    ["POST", "/ingest/health-export-pro?token=url-secret"],
+    ["GET", "/ingest/syncfit?token=url-secret"],
+    ["POST", "/ingest/syncfit?token=url-secret"],
+    ["POST", "/ingest/syncfit/url-secret"],
+    ["POST", "/import/apple-health?token=url-secret"],
+    ["POST", "/import/apple-health/chunk?token=url-secret"],
+    ["GET", "/ingest/hc-webhook?token=url-secret"],
+    ["PUT", "/ingest/hc-webhook?token=url-secret"],
+    ["DELETE", "/ingest/hc-webhook?token=url-secret"],
+    ["GET", "/ingest/hc-webhook/url-secret"],
+    ["GET", "/ingest/life-dashboard?token=url-secret"],
+    ["PUT", "/ingest/life-dashboard/url-secret"],
+    ["DELETE", "/ingest/life-dashboard?token=url-secret"],
+    ["POST", "/ingest/life-dashboard/url-secret/extra"],
+  ];
+  for (const [method, pathname] of denied) {
+    const body = method === "GET" || method === "DELETE" ? undefined : "{}";
+    const response = await handleRequest(request(pathname, { method, token: "", body }), environment);
+    assert.equal(response.status, 401, `${method} ${pathname}`);
+  }
   const summaryBearer = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET", token: "url-secret" }), environment);
   assert.equal(summaryBearer.status, 401);
-  const mcpUrl = await handleRequest(request("/mcp?token=url-secret", { method: "POST", token: "", body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
-  assert.equal(mcpUrl.status, 401);
   const mcpBearer = await handleRequest(request("/mcp", { method: "POST", token: "url-secret", body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
   assert.equal(mcpBearer.status, 401);
-  const ingest = await handleRequest(request("/ingest?token=url-secret", { token: "", body: "{}" }), environment);
-  assert.equal(ingest.status, 401);
-  const syncfit = await handleRequest(request("/ingest/syncfit?token=url-secret", { token: "", body: "{}" }), environment);
-  assert.equal(syncfit.status, 401);
-  const readMethod = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { method: "GET", token: "" }), environment);
-  assert.equal(readMethod.status, 401);
 
   const summary = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET" }), environment);
   assert.equal(summary.status, 200);
@@ -408,4 +439,74 @@ test("Life Dashboard route keeps Health Auto Export on /ingest and rejects scree
   assert.equal(denied.status, 401);
   const unset = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage()));
   assert.equal(unset.status, 401);
+
+  const barePing = await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify({ test: true }) }), environment);
+  assert.equal(barePing.status, 400);
+  const pingWithoutVersion = await handleRequest(request("/ingest/life-dashboard", {
+    body: JSON.stringify({ test: true, source: "health_connect", timestamp: "2026-10-16T12:00:00Z" }),
+  }), environment);
+  assert.equal(pingWithoutVersion.status, 200);
+  assert.equal((await pingWithoutVersion.json()).points, 0);
+});
+
+test("Health Connect dates and values stay inside a real window", async () => {
+  const environment = ctx(new MemoryStorage());
+  const postHc = (body) => handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(body) }), environment);
+  const withSteps = (start) => {
+    const body = hcBody([4]);
+    body.steps = [{ count: 4, start_time: start, end_time: start }];
+    return body;
+  };
+  assert.equal((await postHc(withSteps("2026-13-45T00:00:00Z"))).status, 400);
+  assert.equal((await postHc(withSteps("9999-01-01T00:00:00Z"))).status, 400);
+  assert.equal((await postHc(withSteps("1999-12-31T00:00:00Z"))).status, 400);
+  assert.equal((await postHc(withSteps("2026-02-29T00:00:00Z"))).status, 400);
+  assert.equal((await postHc(hcBody([-5]))).status, 400);
+  assert.equal((await postHc(hcBody([1e12]))).status, 400);
+  const heavy = structuredClone(hcBody([1]));
+  heavy.weight = [{ kilograms: 5000, time: "2026-10-14T07:00:00Z" }];
+  assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(heavy) }), environment)).status, 400);
+  const fat = structuredClone(hcBody([1]));
+  fat.body_fat = [{ percentage: 250, time: "2026-10-14T07:00:00Z" }];
+  assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(fat) }), environment)).status, 400);
+  const energy = structuredClone(hcBody([1]));
+  energy.active_calories = [{ calories: -1, start_time: "2026-10-14T08:00:00Z", end_time: "2026-10-14T09:00:00Z" }];
+  assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(energy) }), environment)).status, 400);
+
+  const edge = ctx(new MemoryStorage());
+  const accepted = structuredClone(hcBody([0]));
+  accepted.steps = [{ count: 0, start_time: "2000-01-01T00:00:00Z", end_time: "2000-01-01T01:00:00Z" }];
+  accepted.weight = [{ kilograms: 0.5, time: "2000-01-01T00:00:00Z" }];
+  accepted.body_fat = [{ percentage: 100, time: "2000-01-01T00:00:00Z" }];
+  const low = await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(accepted) }), edge);
+  assert.equal(low.status, 200);
+  assert.equal((await edge.storage.queryDaySummary("2000-01-01")).steps, 0);
+  assert.deepEqual((await edge.storage.queryDaySummary("2000-01-01")).weight, { value: 0.5, units: "kg" });
+  const future = structuredClone(hcBody([3]));
+  future.steps = [{ count: 3, start_time: "2026-10-18T00:00:00Z", end_time: "2026-10-18T01:00:00Z" }];
+  assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(future) }), edge)).status, 200);
+  const beyond = structuredClone(hcBody([3]));
+  beyond.steps = [{ count: 3, start_time: "2026-10-19T00:00:00Z", end_time: "2026-10-19T01:00:00Z" }];
+  assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(beyond) }), edge)).status, 400);
+
+  const lifeEnvironment = ctx(new MemoryStorage());
+  const badDay = lifeBody({ steps: 9, rawSteps: [] });
+  badDay.daily_totals[0].date = "2026-13-45";
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(badDay) }), lifeEnvironment)).status, 400);
+  const oldDay = lifeBody({ steps: 9, rawSteps: [] });
+  oldDay.daily_totals[0].date = "1999-12-31";
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(oldDay) }), lifeEnvironment)).status, 400);
+  const realDay = lifeBody({ steps: 9, rawSteps: [] });
+  realDay.daily_totals[0].date = "2024-02-29";
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(realDay) }), lifeEnvironment)).status, 200);
+  assert.equal((await lifeEnvironment.storage.queryDaySummary("2024-02-29")).steps, 9);
+  const negativeLife = lifeBody({ steps: -1, rawSteps: [] });
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(negativeLife) }), lifeEnvironment)).status, 400);
+  const heavyLife = lifeBody({ rawSteps: [] });
+  heavyLife.weight = [{ kilograms: 5000, time: "2026-10-14T07:00:00Z", uuid: "w", source: "scale" }];
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(heavyLife) }), lifeEnvironment)).status, 400);
+  const fatLife = lifeBody({ rawSteps: [] });
+  fatLife.body_fat = [{ percentage: -1, time: "2026-10-14T07:00:00Z", uuid: "f", source: "scale" }];
+  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(fatLife) }), lifeEnvironment)).status, 400);
+  assert.equal((await lifeEnvironment.storage.queryDaySummary(summaryDate)).steps, null);
 });

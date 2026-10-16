@@ -71,13 +71,36 @@ export function authed(req, env) {
   return timingSafeEq(presented, urlSecret);
 }
 
-/** Hide ingest tokens in query strings, adapter URL paths, and error text. */
+function decodePercents(value) {
+  let text = String(value ?? "");
+  for (let pass = 0; pass < 3; pass++) {
+    const decoded = text.replace(/%[0-9A-Fa-f]{2}/g, (sequence) => {
+      try {
+        return decodeURIComponent(sequence);
+      } catch {
+        return sequence;
+      }
+    });
+    if (decoded === text) break;
+    text = decoded;
+  }
+  return text;
+}
+
+/**
+ * Hide ingest tokens in query strings, adapter URL paths, and error text.
+ * Percent-encoded keys such as `%74oken` are decoded before the match, so the
+ * value is removed even when the key is not the literal word `token`.
+ */
 export function redactRequestTarget(target, secret, urlSecret) {
-  let text = String(target ?? "")
+  let text = decodePercents(target)
     .replace(/([?&#]token=)[^&#\s]*/gi, "$1[redacted]")
     .replace(/(\/ingest\/(?:hc-webhook|life-dashboard)\/)[^/?#\s]+/g, "$1[redacted]");
   for (const value of [secret, urlSecret]) {
-    if (typeof value === "string" && value.length > 0) text = text.split(value).join("[redacted]");
+    if (typeof value !== "string" || value.length === 0) continue;
+    text = text.split(value).join("[redacted]");
+    const encoded = encodeURIComponent(value);
+    if (encoded !== value) text = text.split(encoded).join("[redacted]");
   }
   return text;
 }

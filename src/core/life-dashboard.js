@@ -1,12 +1,22 @@
 import { DEFAULT_TIME_ZONE } from "./metrics.js";
 import {
   addQuantity,
+  BODY_FAT_PCT_RANGE,
+  clockOptions,
+  dateInWindow,
   datedSample,
+  DISTANCE_M_RANGE,
+  ENERGY_KCAL_RANGE,
   finiteNumber,
   intervalKey,
   isPlainObject,
+  MASS_G_RANGE,
+  rangesOk,
   recordOffset,
+  STEP_RANGE,
+  timesInWindow,
   unitsFromKey,
+  WEIGHT_KG_RANGE,
   workoutFromSession,
 } from "./health-connect.js";
 
@@ -45,8 +55,6 @@ const RECORD_KEYS = [
   "vo2_max",
   "skin_temperature",
 ];
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const SUMMARY_NUTRITION = new Map([
   ["calories", ["dietary_energy", "kcal"]],
@@ -87,15 +95,16 @@ function metadataOk(record) {
 }
 
 /** Null when `body` is a health payload or a test ping. Otherwise "invalid_payload". */
-export function lifeDashboardError(body) {
+export function lifeDashboardError(body, options = {}) {
   if (!isLifeDashboard(body)) return "invalid_payload";
+  const ctx = clockOptions(options);
   if (body.timestamp != null && typeof body.timestamp !== "string") return "invalid_payload";
   if (body.app_version != null && typeof body.app_version !== "string") return "invalid_payload";
   if (body.test === true) return body.timestamp ? null : "invalid_payload";
   if (body.source === "screen_time") return "invalid_payload";
   if (typeof body.app_version !== "string" || !body.app_version) return "invalid_payload";
   if (body.sequence != null && !Number.isInteger(body.sequence)) return "invalid_payload";
-  if (body.daily_totals != null && !dailyTotalsOk(body.daily_totals)) return "invalid_payload";
+  if (body.daily_totals != null && !dailyTotalsOk(body.daily_totals, ctx)) return "invalid_payload";
   if (body.deleted_records != null && !recordsOk(body.deleted_records)) return "invalid_payload";
   if (body._resolutions != null && !isPlainObject(body._resolutions)) return "invalid_payload";
   if (body._diagnostics != null && !isPlainObject(body._diagnostics)) return "invalid_payload";
@@ -130,16 +139,36 @@ export function lifeDashboardError(body) {
   if (!exerciseOk(body.exercise)) return "invalid_payload";
   if (!mindfulnessOk(body.mindfulness)) return "invalid_payload";
   if (!nutritionOk(body.nutrition)) return "invalid_payload";
+  if (!recordsInWindow(body, ctx)) return "invalid_payload";
+  if (!rangesOk(body.steps, { count: STEP_RANGE, total: STEP_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.distance, { meters: DISTANCE_M_RANGE, total: DISTANCE_M_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.active_calories, { calories: ENERGY_KCAL_RANGE, total: ENERGY_KCAL_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.total_calories, { calories: ENERGY_KCAL_RANGE, total: ENERGY_KCAL_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.weight, { kilograms: WEIGHT_KG_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.body_fat, { percentage: BODY_FAT_PCT_RANGE })) return "invalid_payload";
+  if (!rangesOk(body.basal_metabolic_rate, { kilocalories_per_day: ENERGY_KCAL_RANGE })) return "invalid_payload";
   return null;
 }
 
-function dailyTotalsOk(rows) {
+function recordsInWindow(body, ctx) {
+  const offsetFor = (record, key) => recordOffset(record, key.includes("end") ? "end" : "start");
+  for (const key of RECORD_KEYS) {
+    if (!Array.isArray(body[key])) continue;
+    if (body[key].some((record) => !timesInWindow(record, ctx, offsetFor))) return false;
+  }
+  return true;
+}
+
+function dailyTotalsOk(rows, ctx) {
   if (!Array.isArray(rows)) return false;
   for (const row of rows) {
-    if (!isPlainObject(row) || typeof row.date !== "string" || !DATE_RE.test(row.date)) return false;
-    for (const key of ["steps", "distance_meters", "active_calories", "total_calories"]) {
-      if (row[key] != null && !finiteNumber(row[key])) return false;
-    }
+    if (!isPlainObject(row) || !dateInWindow(row.date, ctx.now, ctx.timeZone)) return false;
+    if (!rangesOk([row], {
+      steps: STEP_RANGE,
+      distance_meters: DISTANCE_M_RANGE,
+      active_calories: ENERGY_KCAL_RANGE,
+      total_calories: ENERGY_KCAL_RANGE,
+    })) return false;
   }
   return true;
 }
@@ -248,28 +277,32 @@ function nutritionOk(records) {
     for (const [key, value] of Object.entries(record)) {
       if (key === "name" || key === "meal_type" || key === "start_time" || key === "end_time" || key === "uuid" || key === "source" || key === "metadata") continue;
       if (value != null && !finiteNumber(value) && !isPlainObject(value)) return false;
+      if (finiteNumber(value) && (key === "calories" || key.endsWith("_grams") || key.endsWith("_g"))) {
+        const bounds = key === "calories" ? ENERGY_KCAL_RANGE : MASS_G_RANGE;
+        if (value < bounds[0] || value > bounds[1]) return false;
+      }
     }
   }
   return true;
 }
 
-function stampInterval(record, timeZone) {
+function stampInterval(record, timeZone, now) {
   const offset = recordOffset(record, "start");
   if (typeof record.bucket_start === "string") {
-    const start = datedSample(record.bucket_start, timeZone, offset);
+    const start = datedSample(record.bucket_start, timeZone, offset, now);
     if (!start) return null;
-    const end = typeof record.bucket_end === "string" ? datedSample(record.bucket_end, timeZone, offset) : null;
+    const end = typeof record.bucket_end === "string" ? datedSample(record.bucket_end, timeZone, offset, now) : null;
     return { ts: intervalKey(start.ts, end?.ts), date: start.date };
   }
-  const start = datedSample(record.start_time, timeZone, offset);
+  const start = datedSample(record.start_time, timeZone, offset, now);
   if (!start) return null;
-  const end = typeof record.end_time === "string" ? datedSample(record.end_time, timeZone, recordOffset(record, "end")) : null;
+  const end = typeof record.end_time === "string" ? datedSample(record.end_time, timeZone, recordOffset(record, "end"), now) : null;
   return { ts: intervalKey(start.ts, end?.ts), date: start.date };
 }
 
-function stampInstant(record, timeZone) {
+function stampInstant(record, timeZone, now) {
   const iso = record.time || record.bucket_start;
-  return datedSample(iso, timeZone, recordOffset(record, "start"));
+  return datedSample(iso, timeZone, recordOffset(record, "start"), now);
 }
 
 /**
@@ -281,7 +314,7 @@ function stampInstant(record, timeZone) {
  * @param {{ timeZone?: string }} [options]
  */
 export function parseLifeDashboard(body, options = {}) {
-  const timeZone = options.timeZone || DEFAULT_TIME_ZONE;
+  const { timeZone, now } = clockOptions(options);
   const points = [];
   const workouts = [];
   if (!isPlainObject(body) || body.test === true || body.source === "screen_time") return { points, workouts };
@@ -293,7 +326,7 @@ export function parseLifeDashboard(body, options = {}) {
     total_calories: new Set(),
   };
   for (const row of body.daily_totals || []) {
-    if (!DATE_RE.test(row.date || "")) continue;
+    if (!dateInWindow(row.date, now, timeZone)) continue;
     const stamp = { ts: `${row.date}T00:00:00`, date: row.date };
     if (finiteNumber(row.steps)) {
       addQuantity(points, "step_count", row.steps, "count", stamp);
@@ -313,46 +346,46 @@ export function parseLifeDashboard(body, options = {}) {
     }
   }
 
-  pushIntervals(points, body.steps, "step_count", "count", "count", timeZone, covered.step_count);
-  pushIntervals(points, body.distance, "distance", "meters", "m", timeZone, covered.distance);
-  pushIntervals(points, body.active_calories, "active_energy", "calories", "kcal", timeZone, covered.active_energy);
-  pushIntervals(points, body.total_calories, "total_calories", "calories", "kcal", timeZone, covered.total_calories);
-  pushIntervals(points, body.hydration, "dietary_water", "liters", "L", timeZone);
+  pushIntervals(points, body.steps, "step_count", "count", "count", timeZone, now, covered.step_count);
+  pushIntervals(points, body.distance, "distance", "meters", "m", timeZone, now, covered.distance);
+  pushIntervals(points, body.active_calories, "active_energy", "calories", "kcal", timeZone, now, covered.active_energy);
+  pushIntervals(points, body.total_calories, "total_calories", "calories", "kcal", timeZone, now, covered.total_calories);
+  pushIntervals(points, body.hydration, "dietary_water", "liters", "L", timeZone, now);
 
-  for (const record of body.weight || []) addQuantity(points, "weight_body_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.height || []) addQuantity(points, "height", record.meters, "m", stampInstant(record, timeZone));
-  for (const record of body.body_temperature || []) addQuantity(points, "body_temperature", record.celsius, "degC", stampInstant(record, timeZone));
-  for (const record of body.body_fat || []) addQuantity(points, "body_fat_percentage", record.percentage, "%", stampInstant(record, timeZone));
-  for (const record of body.lean_body_mass || []) addQuantity(points, "lean_body_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.bone_mass || []) addQuantity(points, "bone_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.body_water_mass || []) addQuantity(points, "body_water_mass", record.kilograms, "kg", stampInstant(record, timeZone));
-  for (const record of body.resting_heart_rate || []) addQuantity(points, "resting_heart_rate", record.bpm, "count/min", stampInstant(record, timeZone));
-  for (const record of body.blood_glucose || []) addQuantity(points, "blood_glucose", record.mmol_per_liter, "mmol/L", stampInstant(record, timeZone));
-  for (const record of body.basal_body_temperature || []) addQuantity(points, "basal_body_temperature", record.celsius, "degC", stampInstant(record, timeZone));
-  for (const record of body.basal_metabolic_rate || []) addQuantity(points, "basal_energy_burned", record.kilocalories_per_day, "kcal", stampInstant(record, timeZone));
-  for (const record of body.vo2_max || []) addQuantity(points, "vo2_max", record.vo2_ml_per_min_per_kg, "mL/kg/min", stampInstant(record, timeZone));
-  pushMeasured(points, body.heart_rate, "heart_rate", "bpm", "count/min", timeZone);
-  pushMeasured(points, body.heart_rate_variability, "heart_rate_variability", "heart_rate_variability_millis", "ms", timeZone);
-  pushMeasured(points, body.oxygen_saturation, "oxygen_saturation", "percentage", "%", timeZone);
-  pushMeasured(points, body.respiratory_rate, "respiratory_rate", "rate", "count/min", timeZone);
-  pushMeasured(points, body.skin_temperature, "skin_temperature", "delta_celsius", "degC", timeZone);
+  for (const record of body.weight || []) addQuantity(points, "weight_body_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.height || []) addQuantity(points, "height", record.meters, "m", stampInstant(record, timeZone, now));
+  for (const record of body.body_temperature || []) addQuantity(points, "body_temperature", record.celsius, "degC", stampInstant(record, timeZone, now));
+  for (const record of body.body_fat || []) addQuantity(points, "body_fat_percentage", record.percentage, "%", stampInstant(record, timeZone, now));
+  for (const record of body.lean_body_mass || []) addQuantity(points, "lean_body_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.bone_mass || []) addQuantity(points, "bone_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.body_water_mass || []) addQuantity(points, "body_water_mass", record.kilograms, "kg", stampInstant(record, timeZone, now));
+  for (const record of body.resting_heart_rate || []) addQuantity(points, "resting_heart_rate", record.bpm, "count/min", stampInstant(record, timeZone, now));
+  for (const record of body.blood_glucose || []) addQuantity(points, "blood_glucose", record.mmol_per_liter, "mmol/L", stampInstant(record, timeZone, now));
+  for (const record of body.basal_body_temperature || []) addQuantity(points, "basal_body_temperature", record.celsius, "degC", stampInstant(record, timeZone, now));
+  for (const record of body.basal_metabolic_rate || []) addQuantity(points, "basal_energy_burned", record.kilocalories_per_day, "kcal", stampInstant(record, timeZone, now));
+  for (const record of body.vo2_max || []) addQuantity(points, "vo2_max", record.vo2_ml_per_min_per_kg, "mL/kg/min", stampInstant(record, timeZone, now));
+  pushMeasured(points, body.heart_rate, "heart_rate", "bpm", "count/min", timeZone, now);
+  pushMeasured(points, body.heart_rate_variability, "heart_rate_variability", "heart_rate_variability_millis", "ms", timeZone, now);
+  pushMeasured(points, body.oxygen_saturation, "oxygen_saturation", "percentage", "%", timeZone, now);
+  pushMeasured(points, body.respiratory_rate, "respiratory_rate", "rate", "count/min", timeZone, now);
+  pushMeasured(points, body.skin_temperature, "skin_temperature", "delta_celsius", "degC", timeZone, now);
   for (const record of body.blood_pressure || []) {
-    const stamp = stampInstant(record, timeZone);
+    const stamp = stampInstant(record, timeZone, now);
     addQuantity(points, "blood_pressure_systolic", record.systolic, "mmHg", stamp);
     addQuantity(points, "blood_pressure_diastolic", record.diastolic, "mmHg", stamp);
   }
   for (const record of body.sleep || []) {
-    addQuantity(points, "sleep_analysis", record.duration_seconds, "s", datedSample(record.session_end_time, timeZone, recordOffset(record, "end")));
+    addQuantity(points, "sleep_analysis", record.duration_seconds, "s", datedSample(record.session_end_time, timeZone, recordOffset(record, "end"), now));
   }
   for (const record of body.mindfulness || []) {
-    addQuantity(points, "mindfulness", record.duration_seconds, "s", stampInterval(record, timeZone));
+    addQuantity(points, "mindfulness", record.duration_seconds, "s", stampInterval(record, timeZone, now));
   }
   for (const record of body.exercise || []) {
-    const workout = workoutFromSession(record, timeZone, recordOffset(record, "start"));
+    const workout = workoutFromSession(record, timeZone, recordOffset(record, "start"), now);
     if (workout) workouts.push(workout);
   }
   for (const record of body.nutrition || []) {
-    const stamp = stampInterval(record, timeZone);
+    const stamp = stampInterval(record, timeZone, now);
     for (const [key, value] of Object.entries(record)) {
       if (!finiteNumber(value)) continue;
       const mapped = SUMMARY_NUTRITION.get(key);
@@ -367,18 +400,18 @@ export function parseLifeDashboard(body, options = {}) {
   };
 }
 
-function pushIntervals(points, records, metric, valueKey, units, timeZone, skipDates) {
+function pushIntervals(points, records, metric, valueKey, units, timeZone, now, skipDates) {
   for (const record of records || []) {
-    const stamp = stampInterval(record, timeZone);
+    const stamp = stampInterval(record, timeZone, now);
     if (!stamp || skipDates?.has(stamp.date)) continue;
     const qty = Object.hasOwn(record, "bucket_start") ? record.total : record[valueKey];
     addQuantity(points, metric, qty, units, stamp);
   }
 }
 
-function pushMeasured(points, records, metric, sampleKey, units, timeZone) {
+function pushMeasured(points, records, metric, sampleKey, units, timeZone, now) {
   for (const record of records || []) {
     const qty = Object.hasOwn(record, "bucket_start") ? record.avg : record[sampleKey];
-    addQuantity(points, metric, qty, units, stampInstant(record, timeZone));
+    addQuantity(points, metric, qty, units, stampInstant(record, timeZone, now));
   }
 }
