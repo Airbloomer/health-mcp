@@ -21,7 +21,9 @@ Self-hosted: you run this software and you are responsible for securing your end
 
 `/ingest`, `/import/apple-health`, `/import/apple-health/chunk`, `/ingest/health-export-pro`, `/ingest/syncfit`, `/ingest/hc-webhook`, `/ingest/life-dashboard`, `/summary`, and `/mcp` require `Authorization: Bearer <HEALTH_INGEST_TOKEN>`. A missing or wrong token returns `401` and `{ "error": "unauthorized" }`. Responses are JSON and send `cache-control: no-store`.
 
-The bearer header is the default and is what both Android apps can send as a custom header. When that header is absent, the same token is accepted as the `token` query parameter or as the last path segment of `/ingest/hc-webhook/<token>` and `/ingest/life-dashboard/<token>`. The comparison is constant-time. This server redacts that query value and that path segment from its own error logs. An empty `HEALTH_INGEST_TOKEN` still rejects every request, including those URLs. A request that sends an `Authorization` header is checked only against that header. Prefer the header: a token in the URL can still show up in a proxy or platform access log that this process does not control.
+The bearer header is the default and is what both Android apps can send as a custom header. `GET /summary`, `POST /mcp`, and every other route accept only that header. They never accept a token in the query string or the path, even when the value matches `HEALTH_INGEST_TOKEN`.
+
+`POST /ingest/hc-webhook` and `POST /ingest/life-dashboard` can also accept a different secret, `HEALTH_INGEST_URL_TOKEN`, when the `Authorization` header is absent. Put it in the `token` query parameter or as the last path segment (`/ingest/hc-webhook/<token>` or `/ingest/life-dashboard/<token>`). That variable is unset by default, and URL-token auth stays off until you set it. The comparison is constant-time. A request that sends an `Authorization` header is checked only against `HEALTH_INGEST_TOKEN`; the URL token is not a bearer credential and cannot read. An empty `HEALTH_INGEST_TOKEN` still rejects every bearer request. This server redacts `token` query values and those path segments from its own error logs. A token in the URL can still show up in a proxy or platform access log that this process does not control. See [Security](#security).
 
 ### `POST /ingest`
 
@@ -231,7 +233,8 @@ Other Streamable HTTP clients use the same URL and header. Point the host at whe
 
 | Variable | Required | Where | Purpose |
 | --- | --- | --- | --- |
-| `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token. Empty means every request is rejected. |
+| `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token for every route. Empty means every bearer request is rejected. |
+| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook` and `POST /ingest/life-dashboard` when the app cannot send `Authorization`. Unset by default, which disables `?token=` and the path-token form. It does not authenticate `/summary`, `/mcp`, or any other route. Do not reuse `HEALTH_INGEST_TOKEN`. |
 | `HEALTH_TIMEZONE` | no | Wrangler `[vars]`, or the process environment | IANA zone used when a timestamp has no numeric offset. Default `UTC` when unset. [`wrangler.example.toml`](wrangler.example.toml) sets `America/Los_Angeles`. |
 | `DB` | yes on Cloudflare | Wrangler D1 binding | Must be named `DB`. |
 | `DATABASE_URL` | no | Node | `postgres://` or `postgresql://` URL, otherwise a SQLite file path. |
@@ -245,11 +248,15 @@ Other Streamable HTTP clients use the same URL and header. Point the host at whe
 
 Copy [`.env.example`](.env.example) to `.env` for Node, or [`dev.vars.example`](dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
-On Cloudflare, set the token with `npx wrangler secret put HEALTH_INGEST_TOKEN`. Put `HEALTH_TIMEZONE` in `[vars]` if you do not want `UTC`. The example file sets it to `America/Los_Angeles`; the code still defaults to `UTC` when the variable is absent. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` (gitignored) and replace `database_id`. Set `account_id` in that local file only if Wrangler should target an account other than the one you are logged in to. Do not commit either value, and do not commit a custom hostname.
+On Cloudflare, set the bearer token with `npx wrangler secret put HEALTH_INGEST_TOKEN`. Set the optional write-only URL token the same way, `npx wrangler secret put HEALTH_INGEST_URL_TOKEN`, only if a phone cannot send the header. Do not put either secret in `[vars]`. Put `HEALTH_TIMEZONE` in `[vars]` if you do not want `UTC`. The example file sets it to `America/Los_Angeles`; the code still defaults to `UTC` when the variable is absent. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` (gitignored) and replace `database_id`. Set `account_id` in that local file only if Wrangler should target an account other than the one you are logged in to. Do not commit either value, and do not commit a custom hostname.
 
 ## Security
 
-`HEALTH_INGEST_TOKEN` is the only protection. `/ingest`, the import routes, `/summary`, and `/mcp` accept any client that sends that bearer token. There is no user account, network allowlist, or second check. An empty token rejects every request. Anyone who has the token can read and write the health data this endpoint stores.
+`HEALTH_INGEST_TOKEN` is the credential for every route. `/ingest`, the import routes, `/summary`, and `/mcp` accept any client that sends that bearer token. There is no user account, network allowlist, or second check. An empty token rejects every bearer request. Anyone who has the token can read and write the health data this endpoint stores.
+
+`HEALTH_INGEST_URL_TOKEN` is a separate, optional, write-only secret. Leave it unset unless HC Webhook or Life Dashboard Companion cannot send `Authorization`. While it is unset, `?token=` and `/ingest/hc-webhook/<token>` or `/ingest/life-dashboard/<token>` are rejected. When it is set, it authenticates only `POST` to those two routes. It is rejected on `GET /summary`, `POST /mcp`, `/ingest`, the import routes, and every other path, including when the same value is sent as `Authorization: Bearer`. Generate it with a second `openssl rand -hex 32`. Do not copy `HEALTH_INGEST_TOKEN` into it. If the two values are the same, the URL contains the read credential, and anyone who sees that URL can call `/summary` and `/mcp` by sending it as a bearer token.
+
+A token in a URL is copied into access logs, reverse-proxy logs, browser history, and the `Referer` header when the client requests another URL. This process redacts the query value and the path segment from its own error logs, and the comparison is constant-time. It cannot redact logs kept by a proxy or by the platform in front of it. Prefer the `Authorization` header. Use the URL form only for the two POST routes above, and rotate `HEALTH_INGEST_URL_TOKEN` on its own when a URL may have leaked. Header clients keep working across that rotation.
 
 Use at least 32 random bytes. This prints 32 bytes as hex:
 
@@ -373,7 +380,7 @@ Install [HC Webhook](https://github.com/mcnaveen/health-connect-webhook) on Andr
 3. Add a custom header. Key `Authorization`, value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
 4. For steps, prefer **Daily** resolution so each day is one cumulative total. That row's `n` stays 1, and a later sync replaces the day instead of leaving a partial batch in place. If you use full or bucketed resolution, each request that should win has to include every sample for that metric-day. Incremental sync only sends records new since the last success, and this server does not add that batch onto the stored total.
 5. Weight is stored in kilograms. Set `HEALTH_TIMEZONE` to the phone's zone. These timestamps are UTC instants and do not carry a numeric offset.
-6. If this install cannot set an `Authorization` header, use `https://<your-host>/ingest/hc-webhook/<HEALTH_INGEST_TOKEN>` or append `?token=<HEALTH_INGEST_TOKEN>`. That is the same secret, not a second one. Prefer the header.
+6. If this install cannot set an `Authorization` header, set `HEALTH_INGEST_URL_TOKEN` to its own random value (not `HEALTH_INGEST_TOKEN`) and use `https://<your-host>/ingest/hc-webhook/<HEALTH_INGEST_URL_TOKEN>` or append `?token=<HEALTH_INGEST_URL_TOKEN>`. That secret can only POST to this route and `/ingest/life-dashboard`. It cannot call `/summary` or `/mcp`. Leave the variable unset to disable those URLs. Prefer the header: a token in the URL can leak through logs. See [Security](#security).
 7. Run a sync, then call `GET /summary?date=YYYY-MM-DD`.
 
 Protobuf delivery is not accepted. The local on-device HTTP server speaks the same JSON; point a client at it only on a network you trust, then POST that JSON here with the bearer token.
@@ -384,7 +391,7 @@ Install [Life Dashboard Companion](https://github.com/owen282000/life-dashboard-
 
 1. On the **Health** tab, grant Health Connect permission for the types you store.
 2. Under webhook URLs, add `https://<your-host>/ingest/life-dashboard`.
-3. Under webhook headers, add `Authorization` with value `Bearer <HEALTH_INGEST_TOKEN>`. A URL added by QR pairing does not receive those headers. For that address, put the token in the path or the `token` query parameter, as described for HC Webhook.
+3. Under webhook headers, add `Authorization` with value `Bearer <HEALTH_INGEST_TOKEN>`. A URL added by QR pairing does not receive those headers. For that address, set `HEALTH_INGEST_URL_TOKEN` and put that write-only secret in the path or the `token` query parameter, as described for HC Webhook. Do not put `HEALTH_INGEST_TOKEN` in the URL.
 4. Leave **Daily totals in payload** on. Steps, distance, and calories are taken from `daily_totals` so a walk recorded by both phone and watch is counted once. Today's total is a running total; sending it again replaces the stored day (`n` stays 1) and does not add to it.
 5. This server does not check `X-Signature`. An HMAC secret in the app is optional and is not the credential this route uses.
 6. Set `HEALTH_TIMEZONE` to the phone's zone. `daily_totals.date` is already that local day. Record timestamps are UTC; when record metadata includes a zone offset, that offset picks the day.

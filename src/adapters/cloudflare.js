@@ -5,6 +5,7 @@ export default {
   async fetch(request, env) {
     return handleRequest(request, {
       token: env?.HEALTH_INGEST_TOKEN,
+      urlToken: env?.HEALTH_INGEST_URL_TOKEN,
       timeZone: env?.HEALTH_TIMEZONE,
       storeRaw: env?.HEALTH_STORE_RAW,
       metricAllowlist: env?.HEALTH_METRIC_ALLOWLIST,

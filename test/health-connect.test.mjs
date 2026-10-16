@@ -201,7 +201,7 @@ test("POST /ingest/hc-webhook upserts whole days and ignores a shorter resend", 
   assert.equal((await zoned.queryDaySummary("2026-10-14")).steps, 8);
 });
 
-test("HC Webhook route rejects the wrong shape and a path token is the same secret", async () => {
+test("HC Webhook route rejects the wrong shape", async () => {
   const storage = new MemoryStorage();
   const environment = ctx(storage);
   const bad = await handleRequest(request("/ingest/hc-webhook", { body: "{" }), environment);
@@ -210,30 +210,67 @@ test("HC Webhook route rejects the wrong shape and a path token is the same secr
   assert.equal(shape.status, 400);
   const hae = await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify({ data: { metrics: [] } }) }), environment);
   assert.equal(hae.status, 400);
+  assert.equal(
+    redactRequestTarget("POST /ingest/hc-webhook/s3cret-value?token=s3cret-value failed s3cret-value", "s3cret-value", "other-secret"),
+    "POST /ingest/hc-webhook/[redacted]?token=[redacted] failed [redacted]",
+  );
+  assert.equal(redactRequestTarget("url-only leaked", "bearer-secret", "url-only"), "[redacted] leaked");
+  assert.equal(redactRequestTarget("/ingest/hc-webhook"), "/ingest/hc-webhook");
+});
 
-  const query = await handleRequest(request("/ingest/hc-webhook?token=tok", { token: "", body: JSON.stringify(hcBody([9])) }), environment);
-  assert.equal(query.status, 200);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9);
+test("URL ingest token is write-only, limited to two POST routes, and off by default", async () => {
+  const storage = new MemoryStorage();
+  const off = ctx(storage);
+  const disabledQuery = await handleRequest(request("/ingest/hc-webhook?token=tok", { token: "", body: JSON.stringify(hcBody([9])) }), off);
+  assert.equal(disabledQuery.status, 401);
+  const disabledPath = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 9, rawSteps: [] })) }), off);
+  assert.equal(disabledPath.status, 401);
+  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_TOKEN: "tok" }), false);
+  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), ""), false);
+  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_TOKEN: "", HEALTH_INGEST_URL_TOKEN: "" }), false);
+  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_URL_TOKEN: "   " }), false);
 
-  const path = await handleRequest(request("/ingest/hc-webhook/tok", { token: "", body: JSON.stringify(hcBody([9, 1])) }), environment);
-  assert.equal(path.status, 200);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10);
-
+  const environment = ctx(storage, { urlToken: "url-secret" });
+  const mainAsUrl = await handleRequest(request("/ingest/hc-webhook?token=tok", { token: "", body: JSON.stringify(hcBody([9])) }), environment);
+  assert.equal(mainAsUrl.status, 401);
   const wrongQuery = await handleRequest(request("/ingest/hc-webhook?token=nope", { token: "", body: "{}" }), environment);
   assert.equal(wrongQuery.status, 401);
-  const basic = new Request("http://localhost/ingest/hc-webhook?token=tok", {
+  const basic = new Request("http://localhost/ingest/hc-webhook?token=url-secret", {
     method: "POST",
-    headers: { authorization: "Basic tok", "content-type": "application/json" },
+    headers: { authorization: "Basic url-secret", "content-type": "application/json" },
     body: "{}",
   });
   assert.equal((await handleRequest(basic, environment)).status, 401);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=tok"), ""), false);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=tok"), { HEALTH_INGEST_TOKEN: "" }), false);
-  assert.equal(
-    redactRequestTarget("POST /ingest/hc-webhook/s3cret-value?token=s3cret-value failed s3cret-value", "s3cret-value"),
-    "POST /ingest/hc-webhook/[redacted]?token=[redacted] failed [redacted]",
-  );
-  assert.equal(redactRequestTarget("/ingest/hc-webhook"), "/ingest/hc-webhook");
+  const urlAsBearer = await handleRequest(request("/ingest/hc-webhook", { token: "url-secret", body: JSON.stringify(hcBody([9])) }), environment);
+  assert.equal(urlAsBearer.status, 401);
+
+  const query = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { token: "", body: JSON.stringify(hcBody([9])) }), environment);
+  assert.equal(query.status, 200);
+  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9);
+  const path = await handleRequest(request("/ingest/hc-webhook/url-secret", { token: "", body: JSON.stringify(hcBody([9, 1])) }), environment);
+  assert.equal(path.status, 200);
+  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10);
+  const life = await handleRequest(request("/ingest/life-dashboard/url-secret", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: "url-secret" }));
+  assert.equal(life.status, 200);
+
+  const summaryUrl = await handleRequest(request(`/summary?date=${summaryDate}&token=url-secret`, { method: "GET", token: "" }), environment);
+  assert.equal(summaryUrl.status, 401);
+  const summaryBearer = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET", token: "url-secret" }), environment);
+  assert.equal(summaryBearer.status, 401);
+  const mcpUrl = await handleRequest(request("/mcp?token=url-secret", { method: "POST", token: "", body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
+  assert.equal(mcpUrl.status, 401);
+  const mcpBearer = await handleRequest(request("/mcp", { method: "POST", token: "url-secret", body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
+  assert.equal(mcpBearer.status, 401);
+  const ingest = await handleRequest(request("/ingest?token=url-secret", { token: "", body: "{}" }), environment);
+  assert.equal(ingest.status, 401);
+  const syncfit = await handleRequest(request("/ingest/syncfit?token=url-secret", { token: "", body: "{}" }), environment);
+  assert.equal(syncfit.status, 401);
+  const readMethod = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { method: "GET", token: "" }), environment);
+  assert.equal(readMethod.status, 401);
+
+  const summary = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET" }), environment);
+  assert.equal(summary.status, 200);
+  assert.equal((await summary.json()).steps, 10);
 });
 
 test("Life Dashboard uses daily totals and a same-size resend replaces the running total", async () => {
@@ -369,6 +406,6 @@ test("Life Dashboard route keeps Health Auto Export on /ingest and rejects scree
 
   const denied = await handleRequest(request("/ingest/life-dashboard/nope", { token: "", body: "{}" }), environment);
   assert.equal(denied.status, 401);
-  const path = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage()));
-  assert.equal(path.status, 200);
+  const unset = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage()));
+  assert.equal(unset.status, 401);
 });

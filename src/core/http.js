@@ -29,11 +29,11 @@ function resolveTimeZone(value) {
 
 /**
  * @param {Request} req
- * @param {{ token?: string, timeZone?: string, storeRaw?: boolean | string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], storage: { insertIngest: Function, queryDaySummary: Function, queryMetricRange: Function, listMetrics: Function, listWorkouts: Function }, now?: Date }} ctx
+ * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], storage: { insertIngest: Function, queryDaySummary: Function, queryMetricRange: Function, listMetrics: Function, listWorkouts: Function }, now?: Date }} ctx
  */
 export async function handleRequest(req, ctx) {
   const url = new URL(req.url);
-  if (!authed(req, ctx.token)) {
+  if (!authed(req, { HEALTH_INGEST_TOKEN: ctx.token, HEALTH_INGEST_URL_TOKEN: ctx.urlToken })) {
     const response = json({ error: "unauthorized" }, 401);
     if (url.pathname === "/mcp") response.headers.set("www-authenticate", `Bearer realm="${MCP_SERVER_NAME}"`);
     return response;
