@@ -4,7 +4,7 @@
   "description": "Self-hosted health data endpoint. Works with data exported from Apple Health and Android Health Connect, and serves daily summaries.",
   "keywords": [
     "health-data",
-    "health-auto-export",
+    "health-connect",
     "mcp",
     "self-hosted"
   ],
@@ -15,7 +15,8 @@
   },
   "scripts": {
     "start": "node src/adapters/node.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "migrate:workout-starts": "node src/cli/migrate-workout-starts.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

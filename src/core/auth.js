@@ -1,3 +1,5 @@
+import { isUrlTokenPath, pathToken, ROUTES } from "./routes.js";
+
 function timingSafeEq(a, b) {
   const left = new TextEncoder().encode(a);
   const right = new TextEncoder().encode(b);
@@ -7,7 +9,6 @@ function timingSafeEq(a, b) {
   return diff === 0;
 }
 
-const URL_TOKEN_PATH = /^\/ingest\/(?:hc-webhook|life-dashboard|shortcuts)\/([^/]*)$/;
 /** Raw URL tokens: at least 32 characters, no decoding and no trimming. */
 export const URL_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
 
@@ -52,24 +53,20 @@ function literalQueryToken(search) {
   return undefined;
 }
 
-/** POST /ingest/hc-webhook, /ingest/life-dashboard, and /ingest/shortcuts, including the path-token form. */
+/** POST routes whose `urlToken` flag is set on the shared route table. */
 export function urlTokenRoute(req) {
   if ((req.method || "GET").toUpperCase() !== "POST") return false;
   const url = requestUrl(req);
   if (!url) return false;
-  return url.pathname === "/ingest/hc-webhook"
-    || url.pathname === "/ingest/life-dashboard"
-    || url.pathname === "/ingest/shortcuts"
-    || URL_TOKEN_PATH.test(url.pathname);
+  return ROUTES.some((route) => route.urlToken && route.method === "POST" && route.match(url.pathname))
+    || isUrlTokenPath(url.pathname);
 }
 
 function presentedUrlToken(req) {
   const { path, search } = rawPathAndSearch(req.url);
   const query = literalQueryToken(search);
   if (query !== undefined) return query;
-  const segment = path.match(URL_TOKEN_PATH);
-  if (!segment) return null;
-  return segment[1];
+  return pathToken(path);
 }
 
 function configuredSecret(value) {
@@ -104,7 +101,7 @@ export function activeUrlToken(urlToken, bearerToken) {
 
 /**
  * True when the request carries `Authorization: Bearer <HEALTH_INGEST_TOKEN>`.
- * On POST `/ingest/hc-webhook`, `/ingest/life-dashboard`, and `/ingest/shortcuts` only, a missing
+ * On POST `/ingest/hc-webhook` and `/ingest/shortcuts` only, a missing
  * Authorization header may instead carry `HEALTH_INGEST_URL_TOKEN` as a raw
  * path segment or a literal `token=` query pair. Neither form is decoded or
  * trimmed. The value must match `^[A-Za-z0-9_-]{32,}$`. That secret is
@@ -114,22 +111,32 @@ export function activeUrlToken(urlToken, bearerToken) {
  * `env` may be the bearer token string, or an object with `HEALTH_INGEST_TOKEN`
  * and `HEALTH_INGEST_URL_TOKEN`. A missing or empty secret never authenticates.
  */
-export function authed(req, env) {
+/**
+ * `bearer` only when `Authorization` is `Bearer <token>` and the token matches.
+ * `url` when the header is absent (an empty header counts as absent) and a valid
+ * URL token is present on a URL-token route. Any other scheme, including `Basic`,
+ * is never bearer and never falls through to the URL token.
+ */
+export function tokenClass(req, env) {
   const bearerToken = typeof env === "string" ? env : env?.HEALTH_INGEST_TOKEN;
   const header = req.headers.get("authorization") || "";
   if (header) {
     const expected = configuredSecret(bearerToken);
-    if (!expected) return false;
+    if (!expected) return null;
     const match = header.match(/^Bearer\s+(.+)$/i);
-    if (!match) return false;
-    return timingSafeEq(match[1].trim(), expected);
+    if (!match) return null;
+    return timingSafeEq(match[1].trim(), expected) ? "bearer" : null;
   }
-  if (typeof env === "string" || !urlTokenRoute(req)) return false;
+  if (typeof env === "string" || !urlTokenRoute(req)) return null;
   const urlSecret = activeUrlToken(env?.HEALTH_INGEST_URL_TOKEN, bearerToken);
-  if (!urlSecret) return false;
+  if (!urlSecret) return null;
   const presented = presentedUrlToken(req);
-  if (presented == null || !URL_TOKEN_PATTERN.test(presented)) return false;
-  return timingSafeEq(presented, urlSecret);
+  if (presented == null || !URL_TOKEN_PATTERN.test(presented)) return null;
+  return timingSafeEq(presented, urlSecret) ? "url" : null;
+}
+
+export function authed(req, env) {
+  return tokenClass(req, env) != null;
 }
 
 function decodePercents(value) {
@@ -156,7 +163,7 @@ function decodePercents(value) {
 export function redactRequestTarget(target, secret, urlSecret) {
   let text = decodePercents(target)
     .replace(/([?&#]token=)[^&#\s]*/gi, "$1[redacted]")
-    .replace(/(\/ingest\/(?:hc-webhook|life-dashboard|shortcuts)\/)[^/?#\s]+/g, "$1[redacted]");
+    .replace(/(\/ingest\/[^/?#\s]+\/)[^/?#\s]+/g, "$1[redacted]");
   for (const value of [secret, urlSecret]) {
     if (typeof value !== "string" || value.length === 0) continue;
     text = text.split(value).join("[redacted]");

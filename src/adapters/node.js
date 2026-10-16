@@ -4,8 +4,10 @@ import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { activeUrlToken, redactRequestTarget } from "../core/auth.js";
 import { handleRequest } from "../core/http.js";
+import { limitsFor, OTHER_MAX_BYTES, resolveLimitsProfile } from "../core/limits.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
-import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
+import { MAX_APPLE_EXPORT_BYTES } from "../core/metrics.js";
+import { matchRoute } from "../core/routes.js";
 import { openPostgres } from "./postgres.js";
 import { createSqliteStorage } from "./sqlite.js";
 
@@ -36,12 +38,29 @@ function writeJson(res, status, body) {
   res.end(payload);
 }
 
+/** Send the response, then stop reading the rest of the upload. */
+function writeJsonAndClose(req, res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    "content-length": Buffer.byteLength(payload),
+  });
+  res.end(payload, () => req.destroy());
+}
+
 function requestPath(req) {
   return (req.url || "").split("?")[0];
 }
 
-function bodyLimit(req) {
-  return requestPath(req) === "/mcp" ? MAX_MCP_BYTES : MAX_PAYLOAD_CHARS;
+function bodyLimit(req, limits) {
+  const pathname = requestPath(req);
+  const route = matchRoute(req.method, pathname);
+  if (!route) return OTHER_MAX_BYTES;
+  if (route.guard === "json-ingest") return limits.maxBytes;
+  if (route.guard === "mcp") return MAX_MCP_BYTES;
+  if (route.guard === "apple-stream") return MAX_APPLE_EXPORT_BYTES;
+  return OTHER_MAX_BYTES;
 }
 
 function declaredByteLength(req) {
@@ -52,14 +71,14 @@ function declaredByteLength(req) {
   return Number(value);
 }
 
-async function readBody(req) {
+async function readBody(req, limit) {
   const chunks = [];
   let size = 0;
-  const limit = bodyLimit(req);
   const declared = declaredByteLength(req);
-  if (requestPath(req) === "/mcp" && declared != null && declared > limit) {
+  if (declared != null && declared > limit) {
     const error = new Error("payload_too_large");
     error.code = "PAYLOAD_TOO_LARGE";
+    error.limit = limit;
     throw error;
   }
   for await (const chunk of req) {
@@ -67,6 +86,7 @@ async function readBody(req) {
     if (size > limit) {
       const error = new Error("payload_too_large");
       error.code = "PAYLOAD_TOO_LARGE";
+      error.limit = limit;
       throw error;
     }
     chunks.push(chunk);
@@ -95,23 +115,58 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
+export function nodeProfileError(value) {
+  const resolved = resolveLimitsProfile(value, "node");
+  if (!resolved.invalid) return null;
+  return "HEALTH_LIMITS_PROFILE is not a recognized value";
+}
+
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, limitsProfile, port = 8787, host = "0.0.0.0" }) {
+  const resolved = resolveLimitsProfile(limitsProfile, "node");
+  if (resolved.invalid) {
+    const error = new Error("HEALTH_LIMITS_PROFILE is not a recognized value");
+    error.code = "INVALID_LIMITS_PROFILE";
+    throw error;
+  }
+  const limits = limitsFor(resolved.profile);
   const server = http.createServer(async (req, res) => {
     try {
+      const pathname = requestPath(req);
       let request;
-      if (requestPath(req) === "/import/apple-health" && (req.method || "").toUpperCase() === "POST") {
+      const route = matchRoute(req.method, pathname);
+      if (route?.guard === "apple-stream") {
         const declared = declaredByteLength(req);
         if (declared != null && declared > MAX_APPLE_EXPORT_BYTES) {
-          writeJson(res, 413, { error: "payload_too_large" });
-          req.destroy();
+          writeJsonAndClose(req, res, 413, { error: "payload_too_large" });
           return;
         }
         request = toWebRequest(req, Readable.toWeb(req));
       } else {
-        const body = await readBody(req);
+        const limit = bodyLimit(req, limits);
+        const declared = declaredByteLength(req);
+        if (declared != null && declared > limit) {
+          const payload = route?.guard === "json-ingest"
+            ? { error: "payload_too_large", max_bytes: limit, retry: "split" }
+            : { error: "payload_too_large" };
+          writeJsonAndClose(req, res, 413, payload);
+          return;
+        }
+        const body = await readBody(req, limit);
         request = toWebRequest(req, body);
       }
-      const response = await handleRequest(request, { storage, token, urlToken, timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins });
+      const response = await handleRequest(request, {
+        storage,
+        token,
+        urlToken,
+        timeZone,
+        storeRaw,
+        metricAllowlist,
+        sourcePriority,
+        shortcutsSourcePriority,
+        mcpAllowedOrigins,
+        limitsProfile: resolved.profile,
+        adapter: "node",
+      });
       const payload = Buffer.from(await response.arrayBuffer());
       const headers = { "content-length": payload.length };
       response.headers.forEach((value, key) => {
@@ -121,8 +176,11 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
       res.end(payload);
     } catch (error) {
       if (error?.code === "PAYLOAD_TOO_LARGE") {
-        writeJson(res, 413, { error: "payload_too_large" });
-        req.destroy();
+        const route = matchRoute(req.method, requestPath(req));
+        const payload = route?.guard === "json-ingest"
+          ? { error: "payload_too_large", max_bytes: error.limit, retry: "split" }
+          : { error: "payload_too_large" };
+        writeJsonAndClose(req, res, 413, payload);
         return;
       }
       const message = error instanceof Error ? error.message : error;
@@ -144,6 +202,11 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
+  const profileError = nodeProfileError(process.env.HEALTH_LIMITS_PROFILE);
+  if (profileError) {
+    console.error(profileError);
+    process.exit(1);
+  }
   const token = process.env.HEALTH_INGEST_TOKEN || "";
   const urlToken = activeUrlToken(process.env.HEALTH_INGEST_URL_TOKEN, token);
   const timeZone = process.env.HEALTH_TIMEZONE;
@@ -162,6 +225,7 @@ if (isMainModule()) {
     sourcePriority: process.env.HEALTH_SOURCE_PRIORITY,
     shortcutsSourcePriority: process.env.HEALTH_SHORTCUTS_SOURCE_PRIORITY,
     mcpAllowedOrigins: process.env.MCP_ALLOWED_ORIGINS,
+    limitsProfile: process.env.HEALTH_LIMITS_PROFILE,
     port,
     host,
   });

@@ -4,9 +4,7 @@ import { test } from "node:test";
 import { handleRequest } from "../src/core/http.js";
 import { MAX_MCP_BYTES, MAX_RANGE_DAYS, MAX_TOOL_RESULTS, MCP_PROTOCOL_VERSION, MCP_TOOLS } from "../src/core/mcp.js";
 import { MemoryStorage } from "../src/core/memory.js";
-import { expectedSummary, summaryDate } from "./expected.mjs";
-
-const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
+import { expectedSummary, summaryChunk, summaryDate } from "./expected.mjs";
 const TOOL_NAMES = ["get_daily_summary", "get_metric", "list_metrics", "list_workouts"];
 
 function request(pathname, { method = "GET", token = "tok", body, accept } = {}) {
@@ -56,7 +54,7 @@ test("mcp rejects a missing or wrong bearer token", async () => {
 test("mcp lists only read tools and serves each one", async () => {
   const storage = new MemoryStorage();
   const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z") };
-  const ingested = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(sample) }), ctx);
+  const ingested = await handleRequest(request("/import/apple-health/chunk", { method: "POST", body: JSON.stringify(summaryChunk) }), ctx);
   assert.equal(ingested.status, 200);
 
   const init = await call(ctx, "initialize", {
@@ -107,7 +105,7 @@ test("mcp lists only read tools and serves each one", async () => {
   const workouts = await tool(ctx, "list_workouts", { start_date: summaryDate, end_date: summaryDate });
   assert.deepEqual(workouts.structuredContent.workouts, [{
     name: "Traditional Strength Training",
-    start: "2026-10-14 17:30:00 -0700",
+    start: "2026-10-15T00:30:00.000Z",
     date: summaryDate,
     duration_min: 45,
     kcal: 310,

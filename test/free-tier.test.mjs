@@ -27,6 +27,9 @@ test("retry-after is seconds until the next 00:00 UTC in any host zone", () => {
 test("documented D1 daily-limit errors are recognized and other errors are not", () => {
   assert.equal(d1DailyLimitKind(new Error(`D1_ERROR: ${WRITE_LIMIT}`)), "d1_rows_written");
   assert.equal(d1DailyLimitKind({ cause: { message: READ_LIMIT } }), "d1_rows_read");
+  assert.equal(d1DailyLimitKind(new Error(`${READ_LIMIT} See https://developers.cloudflare.com/d1/platform/limits/ for more details.`)), "d1_rows_read");
+  assert.equal(d1DailyLimitKind(new Error("daily_limit_exceeded")), null);
+  assert.equal(d1DailyLimitKind(new Error("exceeded D1's free tier daily row write limit")), null);
   assert.equal(d1DailyLimitKind(new Error("D1_ERROR: UNIQUE constraint failed")), null);
 });
 
@@ -96,11 +99,14 @@ test("a D1 daily write limit becomes 429 with Retry-After and limit_hit", async 
   const realLog = console.log;
   console.log = (line) => lines.push(String(line));
   try {
-    const sample = fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8");
-    const response = await worker.fetch(new Request("http://example.test/ingest", {
+    const response = await worker.fetch(new Request("http://example.test/ingest/hc-webhook", {
       method: "POST",
       headers: { authorization: "Bearer tok", "content-type": "application/json" },
-      body: sample,
+      body: JSON.stringify({
+        timestamp: "2026-10-16T12:00:00Z",
+        app_version: "1.2.3",
+        steps: [{ count: 1, start_time: "2026-10-14T16:00:00Z", end_time: "2026-10-14T17:00:00Z" }],
+      }),
     }), {
       HEALTH_INGEST_TOKEN: "tok",
       DB: {

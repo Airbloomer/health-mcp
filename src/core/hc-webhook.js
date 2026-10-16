@@ -7,6 +7,7 @@ import {
   DISTANCE_M_RANGE,
   ENERGY_KCAL_RANGE,
   finiteNumber,
+  canonicalStart,
   intervalKey,
   isPlainObject,
   MASS_G_RANGE,
@@ -66,7 +67,7 @@ const NUTRITION_FIELDS = [
 
 /**
  * HC Webhook JSON: `timestamp`, `app_version`, and snake_case record arrays.
- * Life Dashboard payloads carry `source` and are not this format.
+ * A payload that carries `source` is not this format.
  */
 export function isHcWebhook(body) {
   if (!isPlainObject(body)) return false;
@@ -141,10 +142,25 @@ export function hcWebhookError(body, options = {}) {
   return null;
 }
 
+function exerciseInWindow(record, ctx) {
+  if (!isPlainObject(record)) return false;
+  const start = record.start_time;
+  if (typeof start !== "string" || !start) return true;
+  const zone = isPlainObject(record.metadata) ? record.metadata.start_zone_offset : null;
+  if (!canonicalStart(start, ctx.timeZone, zone)) return true;
+  return timesInWindow(record, ctx);
+}
+
 function recordsInWindow(body, ctx) {
   for (const key of RECORD_KEYS) {
     if (!Array.isArray(body[key])) continue;
-    if (body[key].some((record) => !timesInWindow(record, ctx))) return false;
+    for (const record of body[key]) {
+      if (key === "exercise") {
+        if (!exerciseInWindow(record, ctx)) return false;
+        continue;
+      }
+      if (!timesInWindow(record, ctx)) return false;
+    }
   }
   return true;
 }
@@ -220,8 +236,9 @@ function exerciseOk(records) {
   if (records == null) return true;
   for (const record of records) {
     if (typeof record.type !== "string" || !record.type) return false;
-    if (!stringField(record, "start_time", true) || !stringField(record, "end_time", true)) return false;
-    if (!numberField(record, "duration_seconds", true) || !metadataOk(record)) return false;
+    if (record.end_time != null && typeof record.end_time !== "string") return false;
+    if (record.duration_seconds != null && !finiteNumber(record.duration_seconds)) return false;
+    if (!metadataOk(record)) return false;
     for (const key of ["distance_meters", "steps", "avg_cadence_spm", "max_cadence_spm", "stride_length_m"]) {
       if (record[key] != null && !finiteNumber(record[key])) return false;
     }
@@ -304,6 +321,11 @@ export function parseHcWebhook(body, options = {}) {
   }
   for (const record of body.sleep || []) {
     addQuantity(points, "sleep_analysis", record.duration_seconds, "s", datedSample(record.session_end_time, timeZone, null, now));
+    for (const stage of record.stages || []) {
+      const stamp = datedSample(stage.start_time || record.session_end_time, timeZone, null, now);
+      const qty = finiteNumber(stage.duration_seconds) ? stage.duration_seconds : 1;
+      addQuantity(points, "sleep_stage", qty, "s", stamp);
+    }
   }
   for (const record of body.exercise || []) {
     const workout = workoutFromSession(record, timeZone, null, now);
@@ -317,11 +339,16 @@ export function parseHcWebhook(body, options = {}) {
   }
   for (const [key, field] of [
     ["menstruation_flow", "flow"],
+    ["menstruation_period", "flow"],
+    ["intermenstrual_bleeding", null],
     ["ovulation_test", "result"],
     ["cervical_mucus", "appearance"],
     ["sexual_activity", "protection_used"],
   ]) {
-    for (const record of body[key] || []) addQuantity(points, key, record[field], null, stampInstant(record, timeZone, now));
+    for (const record of body[key] || []) {
+      const qty = field && finiteNumber(record[field]) ? record[field] : 1;
+      addQuantity(points, key, qty, null, stampInstant(record, timeZone, now));
+    }
   }
 
   return {

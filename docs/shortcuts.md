@@ -1,6 +1,6 @@
 # iPhone: the Shortcuts app
 
-A free iPhone option with no extra app. The Shortcuts app that comes with iPhone (Apple Shortcuts) reads Health with the **Find Health Samples** action and sends the samples to `POST /ingest/shortcuts` with **Get Contents of URL**. A personal automation runs it once a day.
+Shortcuts is the only live iPhone path. The Shortcuts app that comes with iPhone (Apple Shortcuts) reads Health with the **Find Health Samples** action and sends the samples to `POST /ingest/shortcuts` with **Get Contents of URL**. A personal automation runs it once a day.
 
 > **Status: unverified on a real iPhone.** The server side (format, auth, validation) is covered by `test/shortcuts.test.mjs`. The steps below use documented actions in the Shortcuts app, but the exact menu wording, the output of Format Date, and the limits have not been checked on a device. Steps marked *(unverified)* are the most likely to differ. Please report what you see.
 
@@ -11,7 +11,7 @@ A free iPhone option with no extra app. The Shortcuts app that comes with iPhone
 
 Either way, a request sent with the `Authorization: Bearer` header **replaces** the stored day for every metric-day it contains. Re-sending the same day gives the same result, and a later value wins even if it is lower. Sample counts are not compared. Requests authenticated with the URL token do not replace (see Auth).
 
-**One ingest path per metric.** A Bearer daily total is meant to be the complete day, because Health already merges every source. It therefore replaces that metric-day **whatever app wrote it** (Health Auto Export, SyncFit, an Apple Health import, or an earlier run). This is intended. If another app also sends steps, the last writer wins for that day, so send each metric through only one path. So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
+**One ingest path per metric.** A Bearer daily total is meant to be the complete day, because Health already merges every source. It therefore replaces that metric-day **whatever wrote it** (an HC Webhook sync, an Apple Health import, or an earlier Shortcut run). This is intended. If another source also sends steps, the last writer wins for that day, so send each metric through only one path. So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
 
 ## Request format
 
@@ -64,7 +64,9 @@ The body is an object with a `samples` array, a `workouts` array, or both. Daily
 
 **Errors.** One bad entry rejects the whole request with `400`, for example `{"error":"invalid_payload","at":"samples[12]","field":"start"}`. `at` is the position and `field` the field name. The value you sent is never echoed back. Common causes: a date not in ISO 8601, a value with a thousands separator, an unknown unit, or an `end` before `start`.
 
-**Response.** `{"ok":true,"id":"...","dates":[...],"points":N,"workouts":N,"dropped":N}`. `points` counts stored entries; `dropped` counts entries whose metric is not in the allowlist.
+Send one local day per request. After missed days, catch-up loops oldest first, one request per day, and stops at the first non-2xx. The next run resumes from that day. A 7-day body can exceed the free profile's stored-row cap and return `413` with `retry` set to `split`.
+
+**Response.** `{"ok":true,"id":"...","dates":[...],"points":N,"workouts":N,"dropped":N}`. `points` counts stored entries; `dropped` counts entries whose metric is not in the allowlist. A workout whose start cannot be parsed is omitted and counted in `dropped_workouts`. An empty valid body returns `200` with zero counts and does not write a row.
 
 **Limits.** Same as the other adapters: steps 0 to 1,000,000 per entry, energy 0 to 100,000 kcal, weight 0.5 to 500 kg, body fat 0 to 100 %, dates from 2000-01-01 to two days after the server's today, at most 100,000 entries per request.
 
@@ -74,7 +76,7 @@ Recommended: the header `Authorization: Bearer <HEALTH_INGEST_TOKEN>` on `https:
 
 > **The Bearer header is required for exact daily totals.** Only a request with the header replaces a stored day. A request authenticated with the URL token can add a day that has no data yet, and can update a day that earlier URL-token requests wrote, but it **cannot correct or lower** a day written any other way (with the header, by another app, or by an import). Workouts sent with the URL token are insert-only: a new workout is added, but an existing one (same type and start) is never changed. This keeps a leaked URL token from overwriting your data.
 
-Secondary, only if you prefer not to use a header: the write-only `HEALTH_INGEST_URL_TOKEN` in the path, `https://<your-host>/ingest/shortcuts/<HEALTH_INGEST_URL_TOKEN>`, with no `Authorization` header. A `?token=<HEALTH_INGEST_URL_TOKEN>` query also works, but prefer the path, and prefer the header over both. The same rules as HC Webhook and Life Dashboard Companion apply: the value must match `^[A-Za-z0-9_-]{32,}$`, must differ from `HEALTH_INGEST_TOKEN`, only authenticates `POST` to these ingest routes, and is off when unset. A token in a URL can leak through logs and screenshots; see [Security](security.md). A shortcut you share includes its URL and headers, so never share yours.
+Opt-in and lower-trust: URL-token auth does nothing until `HEALTH_INGEST_URL_TOKEN` is set. It is a write-only secret in the path, `https://<your-host>/ingest/shortcuts/<HEALTH_INGEST_URL_TOKEN>`, with no `Authorization` header. A `?token=<HEALTH_INGEST_URL_TOKEN>` query also works, but prefer the path, and prefer the header over both. The same rules as HC Webhook apply: the value must match `^[A-Za-z0-9_-]{32,}$`, must differ from `HEALTH_INGEST_TOKEN`, only authenticates `POST` to `/ingest/hc-webhook` and `/ingest/shortcuts`, and is off when unset. A token in a URL can leak through logs and screenshots; see [Security](security.md). A shortcut you share includes its URL and headers, so never share yours.
 
 ## Test with curl first
 
@@ -161,7 +163,7 @@ Each run sends yesterday in full and today so far. If a run is missed, the day b
 
 - **The phone must be unlocked.** iOS protects Health data while the device is locked. An automation that fires while locked cannot read samples (or may fail); it does not retry later. Choose a time you normally use the phone.
 - **Per-run sample limit.** Find Health Samples, Repeat, and building text for many samples is slow and can hit a limit in the Shortcuts app or time out *(the exact limit is unverified)*. Daily mode keeps this small. For a long backfill, use [Export from Apple Health](sources.md) instead.
-- **Slower than the apps.** A shortcut takes noticeably longer than Health Auto Export or SyncFit and only runs on schedule, not in the background.
+- **Schedule only.** A shortcut runs when you run it or when the automation fires. It does not sync in the background.
 - **Replace semantics.** Each run replaces the metric-days it sends. A run that sends an incomplete past day overwrites a complete one, which is why the window starts at the start of yesterday.
 - **Units.** The units the Shortcuts app reports depend on the phone's Health settings. Unknown units are rejected, never guessed.
 

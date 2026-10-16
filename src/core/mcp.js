@@ -47,7 +47,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        metric: { type: "string", description: "Health Auto Export metric name, such as step_count." },
+        metric: { type: "string", description: "Stored metric name, such as step_count." },
         start_date: { type: "string", description: "Inclusive start, YYYY-MM-DD." },
         end_date: { type: "string", description: "Inclusive end, YYYY-MM-DD." },
       },
@@ -113,7 +113,7 @@ function dateRange(start, end) {
 
 function metricName(value) {
   const name = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!METRIC_RE.test(name)) throw new ToolInputError("metric must be a Health Auto Export name such as step_count");
+  if (!METRIC_RE.test(name)) throw new ToolInputError("metric must be a stored name such as step_count");
   return name;
 }
 

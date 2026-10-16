@@ -1,21 +1,22 @@
 /**
- * Plan: free tier; upgrade when a real limit is hit.
+ * Defaults fit the Cloudflare free tier. If you hit a limit, see docs/limits.md.
  * D1's free daily row limits reset at 00:00 UTC. This module does not count
  * writes in the isolate and does not sample CPU. Workers timers do not measure CPU.
  *
- * Documented errors (Cloudflare D1, "Debug D1" and the 2026-09-01 changelog):
- * - Your account has exceeded D1's free tier daily row write limit.
- * - Your account has exceeded D1's free tier daily row read limit.
+ * Documented errors, matched as the full sentence (Debug D1 appends a "See https://..." line):
  * https://developers.cloudflare.com/d1/observability/debug-d1/
  * https://developers.cloudflare.com/changelog/post/2026-09-01-d1-free-tier-limit-enforcement/
+ * A constraint name such as daily_limit_exceeded is not one of these sentences.
  */
 
 export const FREE_TIER_PLAN = "free tier; upgrade when a real limit is hit";
 
-const WRITE_LIMIT = "exceeded D1's free tier daily row write limit";
-const READ_LIMIT = "exceeded D1's free tier daily row read limit";
+export const D1_DAILY_ROW_WRITE_LIMIT =
+  "Your account has exceeded D1's free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
+export const D1_DAILY_ROW_READ_LIMIT =
+  "Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
 
-export function d1DailyLimitKind(error) {
+function errorText(error) {
   const parts = [];
   let current = error;
   for (let depth = 0; depth < 4 && current; depth += 1) {
@@ -23,9 +24,13 @@ export function d1DailyLimitKind(error) {
     else if (current.message) parts.push(String(current.message));
     current = current.cause;
   }
-  const message = parts.join("\n");
-  if (message.includes(WRITE_LIMIT)) return "d1_rows_written";
-  if (message.includes(READ_LIMIT)) return "d1_rows_read";
+  return parts.join("\n");
+}
+
+export function d1DailyLimitKind(error) {
+  const message = errorText(error);
+  if (message.includes(D1_DAILY_ROW_WRITE_LIMIT)) return "d1_rows_written";
+  if (message.includes(D1_DAILY_ROW_READ_LIMIT)) return "d1_rows_read";
   return null;
 }
 

@@ -1,4 +1,6 @@
 import { shouldStoreRaw } from "./aggregate.js";
+import { shiftIsoDate, workoutsForRange } from "./dedupe-workouts.js";
+import { DEFAULT_TIME_ZONE } from "./metrics.js";
 import { summarizeDay } from "./summary.js";
 
 /**
@@ -16,13 +18,19 @@ import { summarizeDay } from "./summary.js";
  * `shouldStoreRaw` allows it.
  */
 export class MemoryStorage {
-  constructor() {
+  constructor(options = {}) {
     this.payloads = [];
     this.points = new Map();
     this.workouts = new Map();
+    this.timeZone = options.timeZone || DEFAULT_TIME_ZONE;
+    this.writerColumn = options.writerColumn !== false;
   }
 
   async insertIngest(batch) {
+    if (!this.writerColumn) {
+      const error = new Error("table workouts has no column named writer");
+      throw error;
+    }
     if (shouldStoreRaw(batch)) {
       this.payloads.push({
         id: batch.id,
@@ -47,9 +55,13 @@ export class MemoryStorage {
     }
   }
 
+  workoutsBetween(startDate, endDate) {
+    return [...this.workouts.values()].filter((workout) => workout.date >= startDate && workout.date <= endDate);
+  }
+
   async queryDaySummary(date) {
     const points = [...this.points.values()].filter((point) => point.date === date);
-    const workouts = [...this.workouts.values()].filter((workout) => workout.date === date);
+    const workouts = workoutsForRange(this.workoutsBetween(shiftIsoDate(date, -1), shiftIsoDate(date, 1)), date, date, this.timeZone);
     return summarizeDay(date, points, workouts);
   }
 
@@ -65,9 +77,11 @@ export class MemoryStorage {
   }
 
   async listWorkouts(startDate, endDate) {
-    return [...this.workouts.values()]
-      .filter((workout) => workout.date >= startDate && workout.date <= endDate)
-      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start < b.start ? -1 : a.start > b.start ? 1 : 0))
-      .map((workout) => ({ ...workout }));
+    return workoutsForRange(
+      this.workoutsBetween(shiftIsoDate(startDate, -1), shiftIsoDate(endDate, 1)),
+      startDate,
+      endDate,
+      this.timeZone,
+    );
   }
 }

@@ -35,7 +35,7 @@ npx wrangler dev
 
 To serve a hostname of your own, uncomment `[[routes]]` in the local `wrangler.toml` and set `pattern`. The Workers preview URL works without a custom domain. `workers_dev = true` exposes a public `workers.dev` URL; see [Security](security.md).
 
-If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. Health Auto Export's own timestamps include an offset, and those dates do not use this variable.
+If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. A timestamp that already includes a numeric offset does not use this variable.
 
 The Cloudflare deploy stays on the free tier. Plan: free tier; upgrade when a real limit is hit. A D1 daily-limit error is returned as 429 with `Retry-After` until the next 00:00 UTC. See [API reference](api.md).
 
@@ -81,14 +81,15 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | Variable | Required | Where | Purpose |
 | --- | --- | --- | --- |
 | `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token for every route. Empty means every bearer request is rejected. |
-| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook`, `POST /ingest/life-dashboard`, and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Must match `^[A-Za-z0-9_-]{32,}$`. Unset, too short, or equal to `HEALTH_INGEST_TOKEN` disables URL-token auth. It does not authenticate `/summary`, `/mcp`, or any other route. |
+| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Opt-in, lower-trust write-only token for `POST /ingest/hc-webhook` and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Unset leaves URL-token auth off. Must match `^[A-Za-z0-9_-]{32,}$`. Too short, or equal to `HEALTH_INGEST_TOKEN`, also disables it. It does not authenticate `/summary`, `/mcp`, or any other route. |
 | `HEALTH_TIMEZONE` | no | Wrangler `[vars]`, or the process environment | IANA zone used when a timestamp has no numeric offset. Default `UTC` when unset. [`wrangler.example.toml`](../wrangler.example.toml) sets `America/Los_Angeles`. |
 | `DB` | yes on Cloudflare | Wrangler D1 binding | Must be named `DB`. |
 | `DATABASE_URL` | no | Node | `postgres://` or `postgresql://` URL, otherwise a SQLite file path. |
 | `SQLITE_PATH` | no | Node | SQLite file when `DATABASE_URL` is unset. Default `./data/health.sqlite`. The image sets `/data/health.sqlite`. |
 | `PORT` | no | Node | Default `8787`. |
 | `HOST` | no | Node | Default `0.0.0.0`. |
-| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store each request body in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. `false`, `0`, `no`, and `off` leave it off. Bodies over about 1.5MB are skipped either way, under D1's 2MB row limit. |
+| `HEALTH_LIMITS_PROFILE` | no | Wrangler `[vars]`, or the process environment | `free` or `node`, compared exactly. Cloudflare unset or empty means `free`. Node unset or empty means `node`. `node` on a Worker is allowed only when set explicitly and is logged once. Any other value fails closed: the Worker returns 503, and Node exits 1. Do not set `node` in the Worker example. The free profile's 750 raw-record cap is provisional; see [limits.md](limits.md). |
+| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store the post-filter `{route, points, workouts}` document in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. The original request body is not stored. Documents over about 1.5MB are skipped, under D1's 2MB row limit. |
 | `HEALTH_METRIC_ALLOWLIST` | no | Wrangler `[vars]`, or the process environment | Comma-separated metric names to store in addition to the summary set. |
 | `HEALTH_SHORTCUTS_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Raw-sample mode of `POST /ingest/shortcuts` only. Comma-separated, case-insensitive fragments of source names; the first fragment found in a source name wins that metric-day. Default `watch,iphone`. See [shortcuts.md](shortcuts.md). |
 | `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated `sourceName` values from an export of Apple Health. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
@@ -105,7 +106,7 @@ npm install
 npm test
 ```
 
-`npm test` runs the core against an in-memory storage fake, the Cloudflare adapter against a D1-shaped wrapper over SQLite, and the Node adapter over HTTP with a SQLite file. The Postgres adapter is tested with a fake client that records SQL, so a database server is not required. GitHub Actions runs the same command on pull requests and on pushes to `main`.
+`npm test` runs the core against in-memory storage, the Cloudflare adapter against a D1-shaped wrapper that executes the real SQL on SQLite, and the Node adapter over HTTP. SQL-dependent tests also run on Postgres when `DATABASE_URL` points at Postgres 16. Without that URL they skip locally and print `skip postgres`. In CI a missing database fails the run. GitHub Actions runs the suite under `TZ=UTC` and `TZ=America/Los_Angeles`. No test sets `process.env.TZ`.
 
 ## Layout
 
@@ -113,12 +114,9 @@ npm test
 src/core                 parse, daily aggregate, summarize, bearer auth, HTTP, MCP
 src/core/hk.js           HealthKit quantity and workout names
 src/core/apple-export.js streaming export.xml and zip parser
-src/core/health-export-pro.js
-src/core/syncfit.js      SyncFit schemaVersion 1
 src/core/health-connect.js  shared Health Connect units and exercise names
 src/core/hc-webhook.js   HC Webhook JSON
-src/core/life-dashboard.js  Life Dashboard Companion JSON
-src/core/shortcuts.js       iOS Shortcuts JSON
+src/core/shortcuts.js    iOS Shortcuts JSON
 src/cli/import-apple-health.js
 src/adapters/d1.js       D1 storage
 src/adapters/cloudflare.js

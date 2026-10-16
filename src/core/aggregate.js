@@ -5,10 +5,11 @@ export function summaryMetricNames() {
   return [...Object.keys(SUM_METRICS), ...Object.keys(LATEST_METRICS)];
 }
 
+/** Split on commas, trim, and keep the exact canonical name. No wildcards or case folding. */
 export function parseAllowlist(value) {
   if (value == null || value === false) return [];
   const list = Array.isArray(value) ? value : String(value).split(",");
-  return list.map((name) => String(name).trim().toLowerCase()).filter(Boolean);
+  return list.map((name) => String(name).trim()).filter(Boolean);
 }
 
 /** Summary metrics, plus any extra names from `HEALTH_METRIC_ALLOWLIST`. */

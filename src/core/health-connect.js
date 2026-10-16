@@ -1,3 +1,4 @@
+import { wallClockParts, zoneOffsetMs } from "./datetime.js";
 import { durationMinutesFromSeconds, quantitySample, wordsFromIdentifier } from "./hk.js";
 import { DEFAULT_TIME_ZONE } from "./metrics.js";
 import { localDate } from "./parse.js";
@@ -7,8 +8,8 @@ import { localDate } from "./parse.js";
  * The string keys match AndroidX EXERCISE_TYPE_STRING_TO_INT_MAP, and the
  * last name written for an id is the one toString()-style reverse map keeps
  * (`calisthenics`, `high_intensity_interval_training`, `strength_training`).
- * HC Webhook sends `exerciseType.toString()` (the decimal). Life Dashboard
- * Companion sends that decimal as a string; its iOS app sends the name.
+ * HC Webhook sends `exerciseType.toString()` (the decimal). Shortcuts sends
+ * the exercise name.
  */
 const EXERCISE_TYPES = [
   ["back_extension", 13],
@@ -204,7 +205,7 @@ function titleFromSnake(name) {
     .join(" ");
 }
 
-/** `+HH:MM` / `-HH:MM` as stored on Life Dashboard record metadata. */
+/** `+HH:MM` / `-HH:MM` applied when a record carries a zone offset and the timestamp does not. */
 function offsetTimestamp(iso, offset) {
   if (typeof offset !== "string" || !/^[+-](?:0\d|1[0-4]):[0-5]\d$/.test(offset)) return null;
   const instant = new Date(iso);
@@ -219,7 +220,7 @@ function offsetTimestamp(iso, offset) {
 /**
  * Calendar day for a Health Connect instant.
  * A numeric offset already in the timestamp wins, matching the other adapters.
- * Otherwise a Life Dashboard zone offset is applied, then `HEALTH_TIMEZONE`.
+ * Otherwise an optional zone offset is applied, then `HEALTH_TIMEZONE`.
  */
 export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null, now = new Date()) {
   if (typeof iso !== "string" || !iso) return null;
@@ -232,35 +233,113 @@ export function datedSample(iso, timeZone = DEFAULT_TIME_ZONE, offset = null, no
   return { ts, date };
 }
 
-export function recordOffset(record, which = "start") {
-  const meta = record?.metadata;
-  if (!isPlainObject(meta)) return null;
-  const value = which === "end"
-    ? meta.end_zone_offset || meta.start_zone_offset || meta.zone_offset
-    : meta.zone_offset || meta.start_zone_offset || meta.end_zone_offset;
-  return typeof value === "string" ? value : null;
-}
-
 export function addQuantity(points, metric, qty, units, stamp) {
   const converted = quantitySample(metric, qty, units);
   if (!stamp || !converted) return;
   points.push({ metric, ts: stamp.ts, date: stamp.date, units: converted.units, qty: converted.qty });
 }
 
+const START_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})?$/;
+
+function parseOffsetMinutes(offset) {
+  if (offset == null) return null;
+  if (typeof offset === "number" && Number.isFinite(offset)) return Math.round(offset / 60);
+  const text = String(offset).trim();
+  if (/^z$/i.test(text)) return 0;
+  const match = text.match(/^([+-])(\d{2}):?(\d{2})$/);
+  if (!match) return null;
+  const minutes = Number(match[2]) * 60 + Number(match[3]);
+  if (minutes > 14 * 60) return null;
+  return (match[1] === "-" ? -1 : 1) * minutes;
+}
+
+function sameWall(utcMs, year, month, day, hour, minute, second, timeZone) {
+  const wall = wallClockParts(new Date(utcMs), timeZone);
+  return wall.year === year && wall.month === month && wall.day === day
+    && wall.hour === hour && wall.minute === minute && wall.second === second;
+}
+
+/**
+ * UTC instant for a wall-clock time in `timeZone`.
+ * A spring-gap time moves later. An ambiguous fall-back time takes the earlier instant.
+ */
+function zonedLocalToUtc(year, month, day, hour, minute, second, ms, timeZone) {
+  const desired = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  const utc = desired - zoneOffsetMs(desired, timeZone);
+  const earlier = utc - 3_600_000;
+  if (sameWall(earlier, year, month, day, hour, minute, second, timeZone)) return earlier;
+  return utc;
+}
+
+/**
+ * UTC ISO-8601 with milliseconds, or null when `value` is not an instant.
+ * An explicit `Z` or numeric offset wins. Otherwise `offset` (for example
+ * `metadata.start_zone_offset`), otherwise `timeZone`.
+ */
+export function canonicalStart(value, timeZone = DEFAULT_TIME_ZONE, offset) {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    const year = date.getUTCFullYear();
+    if (year < 1970 || year > 9999) return null;
+    return date.toISOString();
+  }
+  if (value == null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const match = START_RE.exec(text);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (!realCalendarDate(`${match[1]}-${match[2]}-${match[3]}`)) return null;
+  const fraction = match[7] ? Number(match[7].slice(0, 3).padEnd(3, "0")) : 0;
+  const explicit = match[8];
+  const zone = explicit || offset;
+  if (zone) {
+    const offMin = parseOffsetMinutes(zone);
+    if (offMin == null) return null;
+    const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offMin * 60_000;
+    const date = new Date(utc);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString();
+  }
+  const utc = zonedLocalToUtc(year, month, day, hour, minute, second, fraction, timeZone || DEFAULT_TIME_ZONE);
+  const date = new Date(utc);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+/** Local calendar date stored for a workout start. Offset-bearing strings keep the written day. */
+export function workoutLocalDate(value, timeZone, canonicalIso) {
+  const text = String(value ?? "").trim();
+  const written = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+  const hasNumericOffset = /[+-]\d{2}:?\d{2}$/.test(text);
+  if (written && (hasNumericOffset || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text))) return written[1];
+  return localDate(canonicalIso, timeZone || DEFAULT_TIME_ZONE);
+}
+
 export function workoutFromSession(record, timeZone, offset, now = new Date()) {
-  if (!isPlainObject(record) || typeof record.start_time !== "string") return null;
-  const stamp = datedSample(record.start_time, timeZone, offset, now);
-  if (!stamp) return null;
+  if (!isPlainObject(record)) return null;
+  const zone = offset || record.metadata?.start_zone_offset || record.metadata?.zone_offset || null;
+  const start = canonicalStart(record.start_time, timeZone, zone);
+  if (!start) return null;
+  const date = workoutLocalDate(record.start_time, timeZone, start);
+  if (!dateInWindow(date, now, timeZone)) return null;
   let seconds = finiteNumber(record.duration_seconds) ? record.duration_seconds : null;
   if (seconds == null && typeof record.end_time === "string") {
-    const start = new Date(record.start_time);
-    const end = new Date(record.end_time);
-    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) seconds = (end - start) / 1000;
+    const end = canonicalStart(record.end_time, timeZone, zone);
+    if (end) seconds = (Date.parse(end) - Date.parse(start)) / 1000;
   }
   return {
     name: exerciseName(record.type),
-    start: stamp.ts,
-    date: stamp.date,
+    start,
+    date,
     duration_min: durationMinutesFromSeconds(seconds),
     kcal: null,
   };
@@ -271,10 +350,3 @@ export function intervalKey(startTs, endTs) {
   return endTs && endTs !== startTs ? `${startTs}/${endTs}` : startTs;
 }
 
-export function unitsFromKey(key) {
-  if (key.endsWith("_mcg")) return "mcg";
-  if (key.endsWith("_mg")) return "mg";
-  if (key.endsWith("_kcal")) return "kcal";
-  if (key.endsWith("_g") || key.endsWith("_grams")) return "g";
-  return null;
-}
