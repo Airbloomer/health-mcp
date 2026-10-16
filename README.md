@@ -8,7 +8,7 @@
 
 ![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
-Ask your AI chatbot about your own health data. health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option on Android or SyncFit. It runs on a small server that you own, so your data stays with you.
+health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with the Android apps. It runs on a small server that you own, so your data stays with you.
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
@@ -16,7 +16,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 
 ## How it works
 
-- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Health Auto Export on iPhone) posts your health data to your server.
+- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Health Auto Export or SyncFit on iPhone) posts your health data to your server.
 - **Your server keeps it.** health-mcp stores one row per metric per day in a database that you control.
 - **Your chatbot connects.** You add your server to your chatbot as an MCP connector. It can read your data, but never change it.
 
@@ -27,7 +27,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 > - A computer with a terminal
 > - [Node.js](https://nodejs.org) 22 or newer
 > - A free [Cloudflare](https://www.cloudflare.com) account
-> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Health Auto Export (iPhone)
+> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Health Auto Export or SyncFit (iPhone)
 > - A chatbot that supports MCP connectors
 > - About 15 minutes
 
@@ -48,7 +48,7 @@ npx wrangler d1 create health-mcp
 
 The last command prints a `database_id`. Open `wrangler.toml` in a text editor and paste that value in place of `replace-with-d1-database-id`. While you are there, change `HEALTH_TIMEZONE` to your own time zone, for example `Europe/Rome`.
 
-Optional, Android or SyncFit: sleep is not stored by default. To keep sleep from HC Webhook, Life Dashboard Companion, or SyncFit, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
+Optional, Android only: sleep is not stored by default. To keep sleep from HC Webhook or Life Dashboard Companion, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
 
 Then create the database tables. Do this **before** you deploy:
 
@@ -120,9 +120,9 @@ Full setup for both apps: [Data sources](https://github.com/Airbloomer/health-mc
 </details>
 
 <details>
-<summary><strong>iPhone: Health Auto Export</strong></summary>
+<summary><strong>iPhone: Health Auto Export or SyncFit</strong></summary>
 
-In [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api), open **Automations**, tap **New Automation**, choose **REST API**, and set:
+**Health Auto Export:** in [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api), open **Automations**, tap **New Automation**, choose **REST API**, and set:
 
 - **URL:** `https://<your-host>/ingest`
 - **Header:** key `Authorization`, value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token)
@@ -130,6 +130,8 @@ In [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/autom
 - **Data type:** Health Metrics
 
 Create a second automation the same way, with data type **Workouts**. Tap **Manual Export** to send your first data. Automations only run while the phone is unlocked. Full details: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
+
+**SyncFit:** set it to post its native JSON (`schemaVersion` 1 with a `samples` array) to `https://<your-host>/ingest/syncfit`, with header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>`. Steps, energy, weight, body fat, nutrition and workouts are stored. Full details: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#works-with).
 
 </details>
 
@@ -173,10 +175,10 @@ Start a new chat with the connector turned on and ask:
 
 - "How did I train this week?"
 - "How many steps did I take yesterday?"
-- "How did I sleep this week?" (Android or SyncFit, with sleep enabled)
+- "How did I sleep this week?" (Android, with sleep enabled)
 - "Show my weight over the last 30 days."
 
-Your data appears only after the phone app's first sync. The sleep question works only with Android or SyncFit, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
+Your data appears only after the phone app's first sync. The sleep question works only with Android, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
 
 ✅ **Checkpoint:** the chatbot calls a health-mcp tool and answers with your numbers.
 
