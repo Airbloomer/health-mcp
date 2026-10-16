@@ -177,10 +177,10 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Troubleshooting
 
-- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on the two Android webhook routes and `/ingest/shortcuts`, never for `/mcp`.
+- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on three `POST` routes: the two Android webhook routes (`/ingest/hc-webhook`, `/ingest/life-dashboard`) and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
 - **Sending data fails right after deploying.** Run `npx wrangler d1 migrations apply health-mcp --remote`, then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
-- **Totals look too low.** Send whole days. A later sync with fewer samples for a day does not replace a fuller one. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
+- **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 - **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
 
 ## More documentation

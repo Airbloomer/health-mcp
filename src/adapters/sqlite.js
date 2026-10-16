@@ -4,7 +4,8 @@ import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
-import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT, UPSERT_WORKOUT, WORKOUTS_FOR_DATE, WORKOUTS_RANGE } from "./statements.js";
+import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT,
+  REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -32,7 +33,9 @@ export function createSqliteStorage(filename) {
 
   const insertRaw = db.prepare(INSERT_RAW);
   const upsertPoint = db.prepare(UPSERT_POINT);
+  const replacePoint = db.prepare(REPLACE_POINT);
   const upsertWorkout = db.prepare(UPSERT_WORKOUT);
+  const insertWorkout = db.prepare(INSERT_WORKOUT_IF_NEW);
   const pointsForDate = db.prepare(POINTS_FOR_DATE);
   const workoutsForDate = db.prepare(WORKOUTS_FOR_DATE);
   const metricRange = db.prepare(METRIC_RANGE);
@@ -43,10 +46,10 @@ export function createSqliteStorage(filename) {
       insertRaw.run(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload);
     }
     for (const point of batch.points) {
-      upsertPoint.run(point.date, point.metric, point.sum_qty, point.last_qty, point.last_ts, point.units, point.n);
+      (point.replace ? replacePoint : upsertPoint).run(point.date, point.metric, point.sum_qty, point.last_qty, point.last_ts, point.units, point.n);
     }
     for (const workout of batch.workouts) {
-      upsertWorkout.run(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal);
+      (workout.insertOnly ? insertWorkout : upsertWorkout).run(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal);
     }
   });
 

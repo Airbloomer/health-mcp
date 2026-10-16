@@ -35,11 +35,15 @@ export class MemoryStorage {
     for (const point of batch.points) {
       const key = `${point.date}\0${point.metric}`;
       const prev = this.points.get(key);
-      if (prev && !(point.n >= prev.n)) continue;
-      this.points.set(key, { ...point });
+      if (prev && !point.replace && !(point.n >= prev.n)) continue;
+      const { replace, ...stored } = point;
+      this.points.set(key, stored);
     }
     for (const workout of batch.workouts) {
-      this.workouts.set(`${workout.name}\0${workout.start}`, { ...workout });
+      const key = `${workout.name}\0${workout.start}`;
+      if (workout.insertOnly && this.workouts.has(key)) continue;
+      const { insertOnly, ...stored } = workout;
+      this.workouts.set(key, stored);
     }
   }
 

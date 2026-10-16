@@ -10,6 +10,8 @@ import {
   splitStatements,
   toPostgres,
   UPSERT_POINT,
+  REPLACE_POINT,
+  INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
   WORKOUTS_RANGE,
@@ -56,7 +58,7 @@ export function createPostgresStorageFromPool(pool) {
           await client.query(toPostgres(INSERT_RAW), [batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload]);
         }
         for (const point of batch.points) {
-          await client.query(toPostgres(UPSERT_POINT), [
+          await client.query(toPostgres(point.replace ? REPLACE_POINT : UPSERT_POINT), [
             point.date,
             point.metric,
             point.sum_qty,
@@ -67,7 +69,7 @@ export function createPostgresStorageFromPool(pool) {
           ]);
         }
         for (const workout of batch.workouts) {
-          await client.query(toPostgres(UPSERT_WORKOUT), [
+          await client.query(toPostgres(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT), [
             workout.name,
             workout.start,
             workout.date,

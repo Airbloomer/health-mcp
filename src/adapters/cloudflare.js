@@ -11,6 +11,7 @@ export default {
       storeRaw: env?.HEALTH_STORE_RAW,
       metricAllowlist: env?.HEALTH_METRIC_ALLOWLIST,
       sourcePriority: env?.HEALTH_SOURCE_PRIORITY,
+      shortcutsSourcePriority: env?.HEALTH_SHORTCUTS_SOURCE_PRIORITY,
       mcpAllowedOrigins: env?.MCP_ALLOWED_ORIGINS,
       storage: new D1Storage(env?.DB),
     });

@@ -9,6 +9,17 @@ export const UPSERT_POINT =
   "last_ts = excluded.last_ts, units = excluded.units, n = excluded.n " +
   "WHERE excluded.n >= points_daily.n";
 
+/** Unconditional day replace, used by sources that send whole-day values (iOS Shortcuts). */
+export const REPLACE_POINT =
+  "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(date, metric) DO UPDATE SET sum_qty = excluded.sum_qty, last_qty = excluded.last_qty, " +
+  "last_ts = excluded.last_ts, units = excluded.units, n = excluded.n";
+
+/** Insert-only workout, used for URL-token requests: an existing workout is never changed. */
+export const INSERT_WORKOUT_IF_NEW =
+  "INSERT INTO workouts (name, start, date, duration_min, kcal) VALUES (?, ?, ?, ?, ?) " +
+  "ON CONFLICT(name, start) DO NOTHING";
+
 export const UPSERT_WORKOUT =
   "INSERT INTO workouts (name, start, date, duration_min, kcal) VALUES (?, ?, ?, ?, ?) " +
   "ON CONFLICT(name, start) DO UPDATE SET date = excluded.date, duration_min = excluded.duration_min, kcal = excluded.kcal";

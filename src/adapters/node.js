@@ -95,7 +95,7 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
       let request;
@@ -111,7 +111,7 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         const body = await readBody(req);
         request = toWebRequest(req, body);
       }
-      const response = await handleRequest(request, { storage, token, urlToken, timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins });
+      const response = await handleRequest(request, { storage, token, urlToken, timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins });
       const payload = Buffer.from(await response.arrayBuffer());
       const headers = { "content-length": payload.length };
       response.headers.forEach((value, key) => {
@@ -160,6 +160,7 @@ if (isMainModule()) {
     storeRaw: process.env.HEALTH_STORE_RAW,
     metricAllowlist: process.env.HEALTH_METRIC_ALLOWLIST,
     sourcePriority: process.env.HEALTH_SOURCE_PRIORITY,
+    shortcutsSourcePriority: process.env.HEALTH_SHORTCUTS_SOURCE_PRIORITY,
     mcpAllowedOrigins: process.env.MCP_ALLOWED_ORIGINS,
     port,
     host,

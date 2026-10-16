@@ -7,7 +7,7 @@ function timingSafeEq(a, b) {
   return diff === 0;
 }
 
-const URL_TOKEN_PATH = /^\/ingest\/(?:hc-webhook|life-dashboard)\/([^/]*)$/;
+const URL_TOKEN_PATH = /^\/ingest\/(?:hc-webhook|life-dashboard|shortcuts)\/([^/]*)$/;
 /** Raw URL tokens: at least 32 characters, no decoding and no trimming. */
 export const URL_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
 
@@ -52,13 +52,14 @@ function literalQueryToken(search) {
   return undefined;
 }
 
-/** POST /ingest/hc-webhook and POST /ingest/life-dashboard, including the path-token form. */
+/** POST /ingest/hc-webhook, /ingest/life-dashboard, and /ingest/shortcuts, including the path-token form. */
 export function urlTokenRoute(req) {
   if ((req.method || "GET").toUpperCase() !== "POST") return false;
   const url = requestUrl(req);
   if (!url) return false;
   return url.pathname === "/ingest/hc-webhook"
     || url.pathname === "/ingest/life-dashboard"
+    || url.pathname === "/ingest/shortcuts"
     || URL_TOKEN_PATH.test(url.pathname);
 }
 
@@ -103,7 +104,7 @@ export function activeUrlToken(urlToken, bearerToken) {
 
 /**
  * True when the request carries `Authorization: Bearer <HEALTH_INGEST_TOKEN>`.
- * On POST `/ingest/hc-webhook` and POST `/ingest/life-dashboard` only, a missing
+ * On POST `/ingest/hc-webhook`, `/ingest/life-dashboard`, and `/ingest/shortcuts` only, a missing
  * Authorization header may instead carry `HEALTH_INGEST_URL_TOKEN` as a raw
  * path segment or a literal `token=` query pair. Neither form is decoded or
  * trimmed. The value must match `^[A-Za-z0-9_-]{32,}$`. That secret is
@@ -155,7 +156,7 @@ function decodePercents(value) {
 export function redactRequestTarget(target, secret, urlSecret) {
   let text = decodePercents(target)
     .replace(/([?&#]token=)[^&#\s]*/gi, "$1[redacted]")
-    .replace(/(\/ingest\/(?:hc-webhook|life-dashboard)\/)[^/?#\s]+/g, "$1[redacted]");
+    .replace(/(\/ingest\/(?:hc-webhook|life-dashboard|shortcuts)\/)[^/?#\s]+/g, "$1[redacted]");
   for (const value of [secret, urlSecret]) {
     if (typeof value !== "string" || value.length === 0) continue;
     text = text.split(value).join("[redacted]");
