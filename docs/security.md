@@ -25,3 +25,7 @@ To rotate the token, generate a new value with `openssl rand -hex 32` and replac
 Requests without an `Origin` header are allowed. Native clients call `/mcp` that way. A request that sends `Origin` is rejected with `403` unless that origin is listed in `MCP_ALLOWED_ORIGINS`.
 
 `HEALTH_STORE_RAW` defaults to off, so request bodies are not written to `raw_payloads` unless you set it to `true`, `1`, `yes`, or `on`.
+
+### Browser-based MCP clients get `403`
+
+A client that sends an `Origin` header (usually one running in a browser) gets `403` `{ "error": "forbidden_origin" }` until that origin is listed in `MCP_ALLOWED_ORIGINS`. Set it to a comma-separated list such as `https://example.com`. On Cloudflare, put it under `[vars]` in `wrangler.toml` and run `npx wrangler deploy` again. On Node or Docker, set it in the environment and restart.
