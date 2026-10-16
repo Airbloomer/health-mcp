@@ -35,7 +35,7 @@ npx wrangler dev
 
 To serve a hostname of your own, uncomment `[[routes]]` in the local `wrangler.toml` and set `pattern`. The Workers preview URL works without a custom domain. `workers_dev = true` exposes a public `workers.dev` URL; see [Security](security.md).
 
-If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. Health Auto Export's own timestamps include an offset, and those dates do not use this variable.
+If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. A timestamp that already includes a numeric offset does not use this variable.
 
 ### Docker
 
@@ -79,7 +79,7 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | Variable | Required | Where | Purpose |
 | --- | --- | --- | --- |
 | `HEALTH_INGEST_TOKEN` | yes | Worker secret, or the process environment | Bearer token for every route. Empty means every bearer request is rejected. |
-| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook`, `POST /ingest/life-dashboard`, and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Must match `^[A-Za-z0-9_-]{32,}$`. Unset, too short, or equal to `HEALTH_INGEST_TOKEN` disables URL-token auth. It does not authenticate `/summary`, `/mcp`, or any other route. |
+| `HEALTH_INGEST_URL_TOKEN` | no | Worker secret, or the process environment | Write-only token for `POST /ingest/hc-webhook` and `POST /ingest/shortcuts` when the app cannot send `Authorization`. Must match `^[A-Za-z0-9_-]{32,}$`. Unset, too short, or equal to `HEALTH_INGEST_TOKEN` disables URL-token auth. It does not authenticate `/summary`, `/mcp`, or any other route. |
 | `HEALTH_TIMEZONE` | no | Wrangler `[vars]`, or the process environment | IANA zone used when a timestamp has no numeric offset. Default `UTC` when unset. [`wrangler.example.toml`](../wrangler.example.toml) sets `America/Los_Angeles`. |
 | `DB` | yes on Cloudflare | Wrangler D1 binding | Must be named `DB`. |
 | `DATABASE_URL` | no | Node | `postgres://` or `postgresql://` URL, otherwise a SQLite file path. |
@@ -111,12 +111,9 @@ npm test
 src/core                 parse, daily aggregate, summarize, bearer auth, HTTP, MCP
 src/core/hk.js           HealthKit quantity and workout names
 src/core/apple-export.js streaming export.xml and zip parser
-src/core/health-export-pro.js
-src/core/syncfit.js      SyncFit schemaVersion 1
 src/core/health-connect.js  shared Health Connect units and exercise names
 src/core/hc-webhook.js   HC Webhook JSON
-src/core/life-dashboard.js  Life Dashboard Companion JSON
-src/core/shortcuts.js       iOS Shortcuts JSON
+src/core/shortcuts.js    iOS Shortcuts JSON
 src/cli/import-apple-health.js
 src/adapters/d1.js       D1 storage
 src/adapters/cloudflare.js

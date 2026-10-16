@@ -1,4 +1,4 @@
-/** Metric names emitted by Health Auto Export, and the summary fields they fill. */
+/** Stored metric names, and the summary fields they fill. */
 
 export const DEFAULT_TIME_ZONE = "UTC";
 

@@ -17,8 +17,8 @@ export const HK_QUANTITY_METRICS = Object.freeze({
 });
 
 /**
- * HKWorkoutActivityType raw values. Health Export Pro sends these integers.
- * 81 is unused in HealthKit. Names are the identifier suffix.
+ * HKWorkoutActivityType raw values. 81 is unused in HealthKit.
+ * Names are the identifier suffix.
  */
 export const HK_WORKOUT_ACTIVITY_NAMES = Object.freeze({
   1: "AmericanFootball",
@@ -132,7 +132,7 @@ export function hkQuantityMetric(type) {
 
 /**
  * Display name for a workout activity. Accepts an HKWorkoutActivityType
- * string or the integer raw value Health Export Pro sends.
+ * string or the integer raw value.
  */
 export function hkWorkoutName(type) {
   if (typeof type === "number" && Number.isFinite(type)) {
@@ -156,7 +156,7 @@ export function quantitySample(metric, qty, units) {
   return { qty, units: units == null || units === "" ? null : String(units) };
 }
 
-/** One decimal minute, matching Health Auto Export duration handling. */
+/** One decimal minute. */
 export function durationMinutesFromSeconds(seconds) {
   if (seconds == null || !Number.isFinite(seconds)) return null;
   return Math.round(seconds / 6) / 10;
