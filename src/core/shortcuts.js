@@ -243,7 +243,8 @@ function checkWorkout(workout, ctx) {
   return {
     row: {
       name: exerciseName(workout.type ?? ""),
-      start: start.ts,
+      // UTC, so the same instant written in different formats is one upsert key.
+      start: new Date(start.ms).toISOString(),
       date: start.date,
       duration_min: durationMinutesFromSeconds(seconds),
       kcal,

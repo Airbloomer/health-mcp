@@ -58,7 +58,7 @@ test("parseShortcuts normalizes names and units", () => {
   assert.equal(find("weight_body_mass").units, "kg");
   assert.ok(Math.abs(find("weight_body_mass").qty - 81.737) < 0.01);
   assert.equal(points.every((row) => row.date === "2026-10-14"), true);
-  assert.deepEqual(workouts[0], { name: "Running", start: "2026-10-14T17:30:00-07:00", date: "2026-10-14", duration_min: 45, kcal: 310 });
+  assert.deepEqual(workouts[0], { name: "Running", start: "2026-10-15T00:30:00.000Z", date: "2026-10-14", duration_min: 45, kcal: 310 });
 });
 
 test("dates: offset keeps written day, Z uses HEALTH_TIMEZONE, no offset keeps written day", () => {
@@ -369,3 +369,15 @@ for (const [label, make] of [
     assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 4200);
   });
 }
+
+test("workout starts are stored in UTC so one instant in different formats is one workout", async () => {
+  const storage = new MemoryStorage();
+  const opts = { timeZone: "America/Los_Angeles" };
+  for (const start of ["2026-10-14T07:00:00-07:00", "2026-10-14T14:00:00Z", "2026-10-14 07:00:00", "2026-10-14T16:00:00+0200"]) {
+    const res = await handleRequest(request("/ingest/shortcuts", { body: JSON.stringify({ workouts: [{ type: "Running", start, duration: "1800" }] }) }), ctx(storage, opts));
+    assert.equal(res.status, 200);
+  }
+  const { workouts } = await storage.queryDaySummary("2026-10-14");
+  assert.equal(workouts.length, 1);
+  assert.equal(workouts[0].start, "2026-10-14T14:00:00.000Z");
+});
