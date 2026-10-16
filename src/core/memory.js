@@ -40,7 +40,10 @@ export class MemoryStorage {
       this.points.set(key, stored);
     }
     for (const workout of batch.workouts) {
-      this.workouts.set(`${workout.name}\0${workout.start}`, { ...workout });
+      const key = `${workout.name}\0${workout.start}`;
+      if (workout.insertOnly && this.workouts.has(key)) continue;
+      const { insertOnly, ...stored } = workout;
+      this.workouts.set(key, stored);
     }
   }
 

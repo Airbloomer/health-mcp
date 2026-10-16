@@ -8,6 +8,7 @@ import {
   POINTS_FOR_DATE,
   UPSERT_POINT,
   REPLACE_POINT,
+  INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
   WORKOUTS_RANGE,
@@ -42,7 +43,7 @@ export class D1Storage {
     }
     for (const workout of batch.workouts) {
       statements.push(
-        this.db.prepare(UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
+        this.db.prepare(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
       );
     }
     for (let i = 0; i < statements.length; i += D1_BATCH_LIMIT) {

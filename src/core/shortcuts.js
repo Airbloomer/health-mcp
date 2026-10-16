@@ -109,6 +109,8 @@ function wallClockInstant(fields, timeZone) {
   const guess = Date.UTC(fields[0], fields[1] - 1, fields[2], fields[3], fields[4], fields[5]);
   const first = guess - zoneOffsetMs(guess, timeZone);
   const second = guess - zoneOffsetMs(first, timeZone);
+  // A wall-clock time skipped by a DST jump does not exist; reject it.
+  if (second + zoneOffsetMs(second, timeZone) !== guess) return null;
   return second;
 }
 
@@ -131,6 +133,7 @@ export function shortcutTime(value, ctx) {
     const date = text.slice(0, 10);
     if (!dateInWindow(date, ctx.now, ctx.timeZone)) return null;
     const ms = wallClockInstant(fields, ctx.timeZone);
+    if (ms == null) return null;
     const pad = (n) => String(n).padStart(2, "0");
     return { ts: `${date}T${pad(fields[3])}:${pad(fields[4])}:${pad(fields[5])}`, date, ms };
   }
@@ -277,13 +280,18 @@ export function shortcutsError(body, options = {}) {
   if (samples.length + workouts.length > MAX_SHORTCUT_SAMPLES) return invalid();
   const ctx = clockOptions(options);
   const dailyKeys = new Set();
+  const rawKeys = new Set();
   for (let index = 0; index < samples.length; index++) {
     const result = checkSample(samples[index], ctx);
     if (!result.row) return invalid(`samples[${index}]`, result.field);
+    const key = `${result.row.metric}\0${result.row.date}`;
     if (result.row.daily) {
-      const key = `${result.row.metric}\0${result.row.date}`;
       if (dailyKeys.has(key)) return invalid(`samples[${index}]`, "start");
+      if (rawKeys.has(key)) return invalid(`samples[${index}]`, "kind");
       dailyKeys.add(key);
+    } else {
+      if (dailyKeys.has(key)) return invalid(`samples[${index}]`, "kind");
+      rawKeys.add(key);
     }
   }
   for (let index = 0; index < workouts.length; index++) {

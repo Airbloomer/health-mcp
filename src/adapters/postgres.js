@@ -11,6 +11,7 @@ import {
   toPostgres,
   UPSERT_POINT,
   REPLACE_POINT,
+  INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
   WORKOUTS_RANGE,
@@ -68,7 +69,7 @@ export function createPostgresStorageFromPool(pool) {
           ]);
         }
         for (const workout of batch.workouts) {
-          await client.query(toPostgres(UPSERT_WORKOUT), [
+          await client.query(toPostgres(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT), [
             workout.name,
             workout.start,
             workout.date,
