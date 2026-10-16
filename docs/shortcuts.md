@@ -9,7 +9,7 @@ A free iPhone option with no extra app. The Shortcuts app that comes with iPhone
 - **Daily totals (default, recommended).** The Shortcut asks Health for one value per metric per day with the **Group By** option of **Find Health Samples** set to **Day**. Health is expected to combine iPhone and Apple Watch samples into one de-duplicated daily sum *(unverified on a real iPhone; please check the number against the Health app)*. Each entry is sent with `"kind": "daily"` and is stored as that day's total.
 - **Raw samples.** The Shortcut sends individual samples. Use this only if Group By Day does not work for you. A **Source** filter step is required (see below), and the server also keeps one source per metric per day as a backstop.
 
-Either way, each request **replaces** the stored day for every metric-day it contains. Re-sending the same day gives the same result, and a later value wins even if it is lower. Sample counts are not compared. So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
+Either way, a request sent with the `Authorization: Bearer` header **replaces** the stored day for every metric-day it contains. Re-sending the same day gives the same result, and a later value wins even if it is lower. Sample counts are not compared. Requests authenticated with the URL token do not replace (see Auth). So a Shortcut must only send days it has complete data for, or today's running total (see the date window step below).
 
 ## Request format
 
@@ -69,6 +69,8 @@ The body is an object with a `samples` array, a `workouts` array, or both. Daily
 ## Auth
 
 Recommended: the header `Authorization: Bearer <HEALTH_INGEST_TOKEN>` on `https://<your-host>/ingest/shortcuts`. **Get Contents of URL** can set headers, so this works in the Shortcuts app.
+
+> **The Bearer header is required for exact daily totals.** Only a request with the header replaces a stored day. A request authenticated with the URL token can add a day that has no data yet, and can update a day that earlier URL-token requests wrote, but it **cannot correct or lower** a day written any other way (with the header, by another app, or by an import). This keeps a leaked URL token from overwriting your data.
 
 Secondary, only if you prefer not to use a header: the write-only `HEALTH_INGEST_URL_TOKEN` in the path, `https://<your-host>/ingest/shortcuts/<HEALTH_INGEST_URL_TOKEN>`, with no `Authorization` header. A `?token=<HEALTH_INGEST_URL_TOKEN>` query also works, but prefer the path, and prefer the header over both. The same rules as HC Webhook and Life Dashboard Companion apply: the value must match `^[A-Za-z0-9_-]{32,}$`, must differ from `HEALTH_INGEST_TOKEN`, only authenticates `POST` to these ingest routes, and is off when unset. A token in a URL can leak through logs and screenshots; see [Security](security.md). A shortcut you share includes its URL and headers, so never share yours.
 

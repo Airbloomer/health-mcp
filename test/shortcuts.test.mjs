@@ -269,3 +269,29 @@ test("SQLite replace rows overwrite the day regardless of stored n", async () =>
   await storage.insertIngest({ ...base, id: "c", points: [{ ...row, sum_qty: 5, last_qty: 5, n: 1, replace: true }] });
   assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 5);
 });
+
+test("URL-token requests cannot lower a day written with Bearer; Bearer resends still replace", async () => {
+  const storage = new MemoryStorage();
+  const extra = { urlToken: URL_SECRET };
+  const day = (value) => JSON.stringify({ samples: [{ kind: "daily", type: "Steps", value, date: "2026-10-14" }] });
+  const raw = JSON.stringify({ samples: [1, 2, 3].map((h) => ({ type: "Steps", value: "0.5", start: `2026-10-14T0${h}:00:00Z` })) });
+  const viaBearer = (body) => handleRequest(request("/ingest/shortcuts", { body }), ctx(storage, extra));
+  const viaUrl = (body) => handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { token: "", body }), ctx(storage, extra));
+  const steps = async () => (await storage.queryDaySummary("2026-10-14")).steps;
+
+  assert.equal((await viaBearer(day("5000"))).status, 200);
+  assert.equal(await steps(), 5000);
+  assert.equal((await viaUrl(day("1"))).status, 200);
+  assert.equal(await steps(), 5000);
+  assert.equal((await viaUrl(raw)).status, 200);
+  assert.equal(await steps(), 5000);
+  assert.equal((await viaBearer(day("4200"))).status, 200);
+  assert.equal(await steps(), 4200);
+
+  const fresh = new MemoryStorage();
+  const urlOnly = (body) => handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { token: "", body }), ctx(fresh, extra));
+  await urlOnly(day("300"));
+  assert.equal((await fresh.queryDaySummary("2026-10-14")).steps, 300);
+  await urlOnly(day("900"));
+  assert.equal((await fresh.queryDaySummary("2026-10-14")).steps, 900);
+});

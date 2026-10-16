@@ -226,8 +226,15 @@ async function ingestShortcuts(req, ctx) {
   const parsed = parseShortcuts(body, options);
   const allow = storedMetricSet(ctx.metricAllowlist);
   const kept = parsed.points.filter((point) => allow.has(point.metric));
+  const rows = shortcutDays(kept, shortcutsSourcePriority(ctx.shortcutsSourcePriority));
+  // Only the main Bearer token may replace a stored day. `authed` already
+  // passed, so a request with an Authorization header used HEALTH_INGEST_TOKEN.
+  // URL-token rows go through the guarded upsert with n = 0: they can create a
+  // day or update a day the URL token itself wrote, never lower a day with n >= 1.
+  const bearer = Boolean(req.headers.get("authorization"));
+  const points = bearer ? rows : rows.map(({ replace, ...row }) => ({ ...row, n: 0 }));
   return storeIngest(ctx, {
-    points: shortcutDays(kept, shortcutsSourcePriority(ctx.shortcutsSourcePriority)),
+    points,
     workouts: parsed.workouts,
     samples: kept.length,
     bytes: text.length,
