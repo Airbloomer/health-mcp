@@ -126,6 +126,7 @@ test("cloudflare adapter splits D1 writes into batches of 500", async () => {
     receivedAt: "2026-10-14T00:00:00Z",
     bytes: 1,
     payload: "{}",
+    storeRaw: true,
     points,
     workouts: [],
   });
@@ -157,7 +158,8 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   assert.equal(extras, 0);
   assert.equal(storedMetrics, 7 * (Object.keys(SUM_METRICS).length + Object.keys(LATEST_METRICS).length));
   assert.equal(workouts, 14);
-  assert.equal(writes.n, storedMetrics + workouts + 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_payloads").get().n, 0);
+  assert.equal(writes.n, storedMetrics + workouts);
 
   const day = await (await worker.fetch(
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
