@@ -194,7 +194,7 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Disclaimer
 
-health-mcp is an independent open-source project by Airbloomer, LLC. It is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple, iPhone, Apple Watch, Apple Health, HealthKit and Shortcuts are trademarks of Apple Inc., registered in the U.S. and other countries. They are used here only to describe compatibility.
+health-mcp is an independent open-source project by Airbloomer, LLC. It is not affiliated with, endorsed by, or sponsored by Apple Inc. or Google LLC. Apple, iPhone, Apple Watch, Apple Health, HealthKit and Shortcuts are trademarks of Apple Inc., registered in the U.S. and other countries. Google, Android and Health Connect are trademarks of Google LLC. They are used here only to describe compatibility.
 
 health-mcp is not a medical device and does not provide medical advice, diagnosis or treatment. Talk to a qualified professional about any health decision.
 
