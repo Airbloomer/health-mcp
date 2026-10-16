@@ -1,5 +1,7 @@
 # health-mcp
 
+![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](docs/hero.png)
+
 A self-hosted health data endpoint. It works with data exported from Apple Health and with Android Health Connect, and serves daily summaries. `POST /ingest` accepts the [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api) JSON format (export version 2) and the other sources in Works with. `GET /summary` returns one calendar day's totals.
 
 The parsing, aggregation, auth, HTTP handling, and read-only MCP endpoint live in `src/core` and depend only on web standards (`Request`, `Response`, `fetch`, `crypto`, `Intl`). Persistence is a small storage interface. Two adapters implement it:
