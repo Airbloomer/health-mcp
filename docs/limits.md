@@ -1,14 +1,19 @@
 # Request limits
 
-The free profile's raw input record cap is the constant `FREE_MAX_INPUT_RECORDS` in `src/core/limits.js`. Change that constant when a measurement says the cap should move. Do not copy the number into a second place.
+The free profile's raw input record cap is one constant, `FREE_MAX_INPUT_RECORDS` in `src/core/limits.js`. That cap is PROVISIONAL. A Health Connect webhook body at this cap was measured at 156,819 bytes, under the 262,144-byte JSON cap.
 
-That cap is **provisional**. A 750-record Health Connect webhook body was measured at 156,819 bytes, which is under the 262,144-byte JSON cap. CPU time for that payload has not been measured on Cloudflare. Local `wrangler dev --local` does not report or enforce CPU time.
+Do not add a second copy of the number. When the measurement below says the cap should move, change `FREE_MAX_INPUT_RECORDS` only.
 
 ## Measuring CPU time
 
-Use a scratch Worker and an empty database. Do not point the measurement at a database that holds health data.
+Use a scratch Worker and an empty database. Do not point the measurement at a database that holds health data. Leave `HEALTH_LIMITS_PROFILE` unset so the free profile is in effect.
 
-1. Deploy the scratch Worker with `HEALTH_LIMITS_PROFILE` unset, so the free profile is in effect.
-2. Send two `POST /ingest/hc-webhook` bodies of `steps` records. Each record has `count`, `start_time`, `end_time`, and `metadata`. One body has 600 records across two local days. The other has 750 records on one local day.
-3. In Workers analytics, read `cpuTime` for those two requests.
-4. If the 750-record request does not fit the CPU budget, lower `FREE_MAX_INPUT_RECORDS` and repeat on the scratch Worker. Leave the 262,144-byte cap in place unless a fixture exceeds it.
+Send three `POST /ingest/hc-webhook` bodies of `steps` records. Each record has `count`, `start_time`, `end_time`, and `metadata`.
+
+1. 300 records on one local day.
+2. 600 records across two local days.
+3. 750 records on one local day.
+
+In Workers analytics, read `cpuTime` for those requests. Record p50, p99, and max. On the `workersInvocationsAdaptive` dataset, p50 and p99 are the quantiles `cpuTimeP50` and `cpuTimeP99`. max is the maximum `cpuTime` for the same requests.
+
+If CPU exceeds the budget, lower `FREE_MAX_INPUT_RECORDS` and repeat the three fixtures. Keep the 413 `retry` `split` path unchanged. Leave the 262,144-byte cap in place unless a fixture exceeds it.

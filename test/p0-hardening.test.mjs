@@ -13,7 +13,7 @@ import { resetDateTimeFormatCache } from "../src/core/datetime.js";
 import { canonicalStart } from "../src/core/health-connect.js";
 import { handleRequest, json, ROUTES } from "../src/core/http.js";
 import { D1_DAILY_ROW_READ_LIMIT, D1_DAILY_ROW_WRITE_LIMIT, d1DailyLimitKind } from "../src/core/free-tier.js";
-import { FREE_MAX_BYTES, NODE_MAX_BYTES, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
+import { FREE_MAX_BYTES, FREE_MAX_INPUT_RECORDS, NODE_MAX_BYTES, limitsFor, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
 import { SENSITIVE_METRICS } from "../src/core/metrics.js";
 import { localDate } from "../src/core/parse.js";
 import { parseShortcuts, shortcutDays } from "../src/core/shortcuts.js";
@@ -898,6 +898,61 @@ test("41 formatter cache", () => {
   resetDateTimeFormatCache();
 });
 
+test("free input record cap comes only from FREE_MAX_INPUT_RECORDS", () => {
+  const free = limitsFor("free");
+  assert.equal(free.maxInputRecords, FREE_MAX_INPUT_RECORDS);
+  assert.equal(free.maxRecordsPerArray, FREE_MAX_INPUT_RECORDS);
+  assert.equal(free.maxRecordsTotal, FREE_MAX_INPUT_RECORDS);
+
+  const srcRoot = new URL("../src/", import.meta.url);
+  const hits = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        walk(new URL(`${entry.name}/`, dir));
+        continue;
+      }
+      if (!entry.name.endsWith(".js")) continue;
+      const file = new URL(entry.name, dir);
+      const lines = fs.readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, index) => {
+        if (/\b750\b/.test(line)) hits.push(`${file.pathname.slice(srcRoot.pathname.length)}:${index + 1}:${line.trim()}`);
+      });
+    }
+  };
+  walk(srcRoot);
+  assert.equal(hits.length, 1);
+  assert.match(hits[0], /^core\/limits\.js:\d+:export const FREE_MAX_INPUT_RECORDS = 750;$/);
+
+  const limitsSrc = fs.readFileSync(new URL("../src/core/limits.js", import.meta.url), "utf8");
+  const comment = limitsSrc.slice(0, limitsSrc.indexOf("export const FREE_MAX_INPUT_RECORDS"));
+  assert.match(comment, /PROVISIONAL/);
+  assert.equal((comment.match(/\b750\b/g) || []).length, 0);
+  assert.equal((limitsSrc.match(/maxInputRecords:\s*750|maxRecordsPerArray:\s*750|maxRecordsTotal:\s*750/g) || []).length, 0);
+
+  const httpSrc = fs.readFileSync(new URL("../src/core/http.js", import.meta.url), "utf8");
+  assert.equal((httpSrc.match(/\b750\b/g) || []).length, 0);
+  const capStart = httpSrc.indexOf("const records = countRecords(body);");
+  const capEnd = httpSrc.indexOf("const workoutsIn", capStart);
+  const cap = httpSrc.slice(capStart, capEnd);
+  assert.match(cap, /records\.perArray > limits\.maxRecordsPerArray \|\| records\.total > limits\.maxInputRecords/);
+  assert.match(cap, /error: "too_many_records"/);
+  assert.match(cap, /retry: "split"/);
+  assert.match(cap, /, 413\)/);
+  assert.equal((cap.match(/\b750\b/g) || []).length, 0);
+  assert.equal(httpSrc.split('error: "too_many_records"').length, 2);
+
+  const limitsDoc = fs.readFileSync(new URL("../docs/limits.md", import.meta.url), "utf8");
+  assert.match(limitsDoc, /PROVISIONAL/);
+  assert.match(limitsDoc, /scratch Worker/);
+  assert.match(limitsDoc, /FREE_MAX_INPUT_RECORDS/);
+  for (const word of ["300", "600", "750", "cpuTime", "p50", "p99", "max"]) {
+    assert.match(limitsDoc, new RegExp(`\\b${word}\\b`));
+  }
+  assert.match(limitsDoc, /If CPU exceeds the budget, lower `FREE_MAX_INPUT_RECORDS`/);
+  assert.match(limitsDoc, /Keep the 413 `retry` `split` path unchanged/);
+});
+
 test("42 and 43 free input record cap", async () => {
   const records = (count, day = 14) => hc({
     steps: Array.from({ length: count }, (_, index) => ({
@@ -907,11 +962,11 @@ test("42 and 43 free input record cap", async () => {
     })),
   });
   const memory = openMemory();
-  const accepted = await post(memory, "/ingest/hc-webhook", records(750));
+  const accepted = await post(memory, "/ingest/hc-webhook", records(FREE_MAX_INPUT_RECORDS));
   assert.equal(accepted.status, 200);
-  const rejected = await post(memory, "/ingest/hc-webhook", records(751));
+  const rejected = await post(memory, "/ingest/hc-webhook", records(FREE_MAX_INPUT_RECORDS + 1));
   assert.equal(rejected.status, 413);
-  assert.deepEqual(await rejected.json(), { error: "too_many_records", max: 750, retry: "split" });
+  assert.deepEqual(await rejected.json(), { error: "too_many_records", max: FREE_MAX_INPUT_RECORDS, retry: "split" });
   assert.equal(memory.storage.points.size, 1);
   const padded = records(2500);
   for (const step of padded.steps) step.pad = "x".repeat(12);
@@ -935,7 +990,7 @@ test("42 and 43 free input record cap", async () => {
   const cpu = process.cpuUsage(cpuBefore);
   assert.equal(twoDay.status, 200);
   assert.ok((cpu.user + cpu.system) / 1000 < 250);
-  const over = await post(openMemory(), "/ingest/hc-webhook", records(751));
+  const over = await post(openMemory(), "/ingest/hc-webhook", records(FREE_MAX_INPUT_RECORDS + 1));
   assert.equal(over.status, 413);
 });
 

@@ -8,9 +8,10 @@ export const FREE_MAX_URL_WORKOUTS = 40;
 export const FREE_MAX_BEARER_WORKOUTS = 40;
 export const FREE_MAX_STORED_ROWS = 40;
 /**
- * Provisional raw-input cap for the free profile. Bytes for 750 records were measured
- * at 156,819, under 262,144. CPU time on Cloudflare has not been measured.
- * Change this constant after that measurement. See docs/limits.md.
+ * PROVISIONAL raw-input cap for the free profile. This is the only copy of the number.
+ * A body at this cap measured 156,819 bytes, under 262,144.
+ * Read cpuTime with the procedure in docs/limits.md. If CPU exceeds the budget,
+ * lower this constant. Leave the 413 retry:split path unchanged.
  */
 export const FREE_MAX_INPUT_RECORDS = 750;
 
