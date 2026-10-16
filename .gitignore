@@ -11,3 +11,6 @@ node_modules/
 *.pem
 wrangler.toml
 data/
+tenants/*.rendered.toml
+*.rendered.toml
+*.secret

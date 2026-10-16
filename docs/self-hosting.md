@@ -37,6 +37,8 @@ To serve a hostname of your own, uncomment `[[routes]]` in the local `wrangler.t
 
 If you previously ran a build that assumed Pacific Time for offset-less timestamps, set `HEALTH_TIMEZONE` to `America/Los_Angeles`. Health Auto Export's own timestamps include an offset, and those dates do not use this variable.
 
+The Cloudflare deploy stays on the free tier. Plan: free tier; upgrade when a real limit is hit. A D1 daily-limit error is returned as 429 with `Retry-After` until the next 00:00 UTC. See [API reference](api.md).
+
 ### Docker
 
 ```bash
