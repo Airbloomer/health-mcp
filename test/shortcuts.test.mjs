@@ -145,10 +145,12 @@ test("HEALTH_INGEST_URL_TOKEN works on /ingest/shortcuts, write-only and off whe
 
 test("prototype keys are not treated as known types or units", () => {
   const opts = { timeZone: "UTC", now: NOW };
-  for (const name of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf", "__defineGetter__"]) {
+  for (const name of ["__proto__", "constructor", "Constructor", "__defineGetter__", "__lookupSetter__"]) {
     assert.equal(shortcutMetric(name), null);
     assert.equal(shortcutsError({ samples: [{ type: name, value: "1", start: "2026-10-14T09:00:00Z" }] }, opts), "invalid_payload");
   }
+  // Mixed-case names are lowercased first, so "toString" becomes an ordinary name, not a prototype key.
+  assert.equal(shortcutMetric("toString"), "tostring");
   assert.equal(parseShortcuts({ samples: [{ type: "__proto__", value: "1", start: "2026-10-14T09:00:00Z" }] }, opts).points.length, 0);
   for (const unit of ["__proto__", "constructor", "toString"]) {
     assert.equal(shortcutsError({ samples: [{ type: "weight", value: "70", unit, start: "2026-10-14T09:00:00Z" }] }, opts), "invalid_payload");
