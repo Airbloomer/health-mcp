@@ -1,12 +1,18 @@
 # health-mcp
 
-![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
+**Ask your AI chatbot about your own health data, from a server you own.**
 
-*Self-hosted · read-only MCP · iPhone and Android*
+[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Deploy · Cloudflare Workers](https://img.shields.io/badge/deploy-Cloudflare%20Workers-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
+
+*[Self-hosted](#quick-start) · read-only MCP · iPhone and Android*
+
+![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
 Ask your AI chatbot about your own health data. health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option on Android or SyncFit. It runs on a small server that you own, so your data stays with you.
 
 Not medical advice. See [Disclaimer](#disclaimer).
+
+[Quick start](#quick-start) · [Troubleshooting](#troubleshooting) · [Hosted version](#hosted-version)
 
 ## How it works
 
