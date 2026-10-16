@@ -1,16 +1,20 @@
 # health-mcp
 
+**Ask your AI chatbot about your own health data, from a server you own.**
+
+[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Cloudflare Workers · Node · Docker](https://img.shields.io/badge/runs%20on-Cloudflare%20Workers%20%C2%B7%20Node%20%C2%B7%20Docker-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
+
 ![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
-*Self-hosted · read-only MCP · iPhone and Android*
-
-Ask your AI chatbot about your own health data. health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option on Android or SyncFit. It runs on a small server that you own, so your data stays with you.
+health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with the Android apps. Your data stays on your server.
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
+[Quick start](#quick-start) · [Troubleshooting](#troubleshooting) · [Hosted version](#hosted-version)
+
 ## How it works
 
-- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Health Auto Export on iPhone) posts your health data to your server.
+- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Apple Shortcuts on iPhone, built in with no extra app) posts your health data to your server.
 - **Your server keeps it.** health-mcp stores one row per metric per day in a database that you control.
 - **Your chatbot connects.** You add your server to your chatbot as an MCP connector. It can read your data, but never change it.
 
@@ -21,7 +25,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 > - A computer with a terminal
 > - [Node.js](https://nodejs.org) 22 or newer
 > - A free [Cloudflare](https://www.cloudflare.com) account
-> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Health Auto Export (iPhone)
+> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Apple Shortcuts (iPhone, built in)
 > - A chatbot that supports MCP connectors
 > - About 15 minutes
 
@@ -42,7 +46,7 @@ npx wrangler d1 create health-mcp
 
 The last command prints a `database_id`. Open `wrangler.toml` in a text editor and paste that value in place of `replace-with-d1-database-id`. While you are there, change `HEALTH_TIMEZONE` to your own time zone, for example `Europe/Rome`.
 
-Optional, Android or SyncFit: sleep is not stored by default. To keep sleep from HC Webhook, Life Dashboard Companion, or SyncFit, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
+Optional, Android only: sleep is not stored by default. To keep sleep from HC Webhook or Life Dashboard Companion, add `"sleep_analysis"` to `HEALTH_METRIC_ALLOWLIST` in `wrangler.toml` (it's already there, commented out, in `wrangler.example.toml`). Remove the `#` from that line and set it to `HEALTH_METRIC_ALLOWLIST = "sleep_analysis"`, or add `sleep_analysis` to its comma-separated list, rather than adding a second `HEALTH_METRIC_ALLOWLIST` line.
 
 Then create the database tables. Do this **before** you deploy:
 
@@ -114,20 +118,19 @@ Full setup for both apps: [Data sources](https://github.com/Airbloomer/health-mc
 </details>
 
 <details>
-<summary><strong>iPhone: Health Auto Export</strong></summary>
+<summary><strong>iPhone: Apple Shortcuts</strong></summary>
 
-In [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api), open **Automations**, tap **New Automation**, choose **REST API**, and set:
+Shortcuts is built into iPhone, so there's no extra app to install. A shortcut reads your Health data in daily mode (**Find Health Samples** with **Group By** set to **Day**, one total per metric per day) and sends it to `https://<your-host>/ingest/shortcuts` with the header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
 
-- **URL:** `https://<your-host>/ingest`
-- **Header:** key `Authorization`, value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token)
-- **Export format:** JSON. **Export version:** Version 2
-- **Data type:** Health Metrics
+Full setup: [Shortcuts guide](https://github.com/Airbloomer/health-mcp/blob/main/docs/shortcuts.md)
 
-Create a second automation the same way, with data type **Workouts**. Tap **Manual Export** to send your first data. Automations only run while the phone is unlocked. Full details: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
+Note: these steps are tested against the server but not yet verified on a device.
+
+Prefer a dedicated app? See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 
 </details>
 
-✅ **Checkpoint:** run the same `curl` command from step 2 with yesterday's date (`YYYY-MM-DD`). You should now see numbers, such as `"steps"`, instead of empty values.
+✅ **Checkpoint:** after your first sync (on iPhone, run the shortcut once), run the same `curl` command from step 2 with yesterday's date (`YYYY-MM-DD`). You should now see numbers, such as `"steps"`, instead of empty values.
 
 ### 4. Connect your chatbot
 
@@ -167,20 +170,20 @@ Start a new chat with the connector turned on and ask:
 
 - "How did I train this week?"
 - "How many steps did I take yesterday?"
-- "How did I sleep this week?" (Android or SyncFit, with sleep enabled)
+- "How did I sleep this week?" (Android, with sleep enabled)
 - "Show my weight over the last 30 days."
 
-Your data appears only after the phone app's first sync. The sleep question works only with Android or SyncFit, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
+Your data appears only after the phone app's first sync. The sleep question works only with Android, after you enable sleep with the optional `HEALTH_METRIC_ALLOWLIST` setting in step 1.
 
 ✅ **Checkpoint:** the chatbot calls a health-mcp tool and answers with your numbers.
 
 ## Troubleshooting
 
-- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on the two Android webhook routes, never for `/mcp`.
+- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on three `POST` routes: the two Android webhook routes (`/ingest/hc-webhook`, `/ingest/life-dashboard`) and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
 - **Sending data fails right after deploying.** Run `npx wrangler d1 migrations apply health-mcp --remote`, then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
-- **Nothing arrives from the iPhone.** Unlock the phone and tap **Manual Export**. Health Auto Export runs only while the phone is unlocked.
+- **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
 
 ## More documentation
 
@@ -191,11 +194,15 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Disclaimer
 
-Not affiliated with, endorsed or sponsored by Apple Inc. Apple, Apple Health and HealthKit are trademarks of Apple Inc. Health Auto Export, SyncFit, Health Export Pro, Google, Health Connect, HC Webhook and Life Dashboard Companion are trademarks of their respective owners and are mentioned only to describe compatibility; no endorsement is implied.
+health-mcp is an independent open-source project by Airbloomer, LLC. It is not affiliated with, endorsed by, or sponsored by Apple Inc. or Google LLC. Apple, iPhone, Apple Watch, Apple Health, HealthKit and Shortcuts are trademarks of Apple Inc., registered in the U.S. and other countries. Google, Android and Health Connect are trademarks of Google LLC. They are used here only to describe compatibility.
 
-Not medical advice and not a medical device. This software is for personal informational use only and is not intended to diagnose, treat or prevent any condition. Consult a qualified professional for medical decisions.
+health-mcp is not a medical device and does not provide medical advice, diagnosis or treatment. Talk to a qualified professional about any health decision.
 
-Self-hosted: you run this software and you are responsible for securing your endpoint and your health data. Airbloomer, LLC does not host, receive or access any user data. Provided 'as is' under the MIT License, without warranty.
+health-mcp is self-hosted software. You run it and you control your data, and you are responsible for securing your server. Airbloomer, LLC does not host, receive or access your health data.
+
+Any third-party apps mentioned in this project's docs are owned by their respective owners and are not affiliated with or endorsed by Airbloomer, LLC. Use them under their own terms and privacy policies.
+
+Provided under the license in LICENSE, "as is", without warranty of any kind.
 
 ## Hosted version
 
