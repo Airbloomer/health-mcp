@@ -2,6 +2,7 @@ import http from "node:http";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { redactRequestTarget } from "../core/auth.js";
 import { handleRequest } from "../core/http.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
@@ -124,7 +125,8 @@ export function startServer({ storage, token = "", timeZone, storeRaw, metricAll
         req.destroy();
         return;
       }
-      console.error(error instanceof Error ? error.message : error);
+      const message = error instanceof Error ? error.message : error;
+      console.error(redactRequestTarget(`${req.method || ""} ${req.url || ""} ${message}`, token));
       if (!res.headersSent) writeJson(res, 500, { error: "internal" });
       else res.destroy();
     }

@@ -1,7 +1,7 @@
 {
   "name": "@airbloomer/health-mcp",
   "version": "0.1.0",
-  "description": "Self-hosted health data endpoint. Works with data exported from Apple Health and serves daily summaries.",
+  "description": "Self-hosted health data endpoint. Works with data exported from Apple Health and Android Health Connect, and serves daily summaries.",
   "keywords": [
     "health-data",
     "health-auto-export",
