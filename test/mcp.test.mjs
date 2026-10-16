@@ -47,7 +47,7 @@ test("mcp rejects a missing or wrong bearer token", async () => {
   const missing = await handleRequest(request("/mcp", { method: "POST", token: "", body: rpc("tools/list") }), ctx);
   assert.equal(missing.status, 401);
   assert.deepEqual(await missing.json(), { error: "unauthorized" });
-  assert.match(missing.headers.get("www-authenticate"), /Bearer realm="apple-health-mcp"/);
+  assert.match(missing.headers.get("www-authenticate"), /Bearer realm="health-mcp"/);
 
   const wrong = await handleRequest(request("/mcp", { method: "POST", token: "nope", body: rpc("tools/list") }), ctx);
   assert.equal(wrong.status, 401);
@@ -67,7 +67,7 @@ test("mcp lists only read tools and serves each one", async () => {
   assert.equal(init.status, 200);
   assert.equal(init.body.result.protocolVersion, "2025-06-18");
   assert.equal(init.body.result.capabilities.tools.listChanged, false);
-  assert.equal(init.body.result.serverInfo.name, "apple-health-mcp");
+  assert.equal(init.body.result.serverInfo.name, "health-mcp");
 
   const listed = await call(ctx, "tools/list");
   assert.deepEqual(listed.body.result.tools.map((entry) => entry.name), TOOL_NAMES);

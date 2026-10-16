@@ -16,11 +16,11 @@ export function storedMetricSet(allowlist) {
   return new Set([...summaryMetricNames(), ...parseAllowlist(allowlist)]);
 }
 
-/** Raw request bodies are stored unless the flag is a false value. */
+/** Raw request bodies are stored only when the flag is explicitly enabled. */
 export function rawStorageEnabled(value) {
   if (typeof value === "boolean") return value;
-  if (value == null || String(value).trim() === "") return true;
-  return !/^(0|false|no|off)$/i.test(String(value).trim());
+  if (value == null || String(value).trim() === "") return false;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
 }
 
 /** Byte length of a string in UTF-8, which is what SQLite and D1 store. */

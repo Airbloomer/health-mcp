@@ -2,7 +2,7 @@ import { aggregateDays, shouldStoreRaw, storedMetricSet } from "./aggregate.js";
 import { appleChunkError, looksLikeAppleExport, parseAppleExport } from "./apple-export.js";
 import { authed } from "./auth.js";
 import { healthExportProError, parseHealthExportPro } from "./health-export-pro.js";
-import { declaredContentLength, handleMcp } from "./mcp.js";
+import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
 import { DEFAULT_TIME_ZONE, MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "./metrics.js";
 import { localDate, parse, payloadError } from "./parse.js";
 import { parseSyncFit, syncFitError } from "./syncfit.js";
@@ -27,7 +27,7 @@ export async function handleRequest(req, ctx) {
   const url = new URL(req.url);
   if (!authed(req, ctx.token)) {
     const response = json({ error: "unauthorized" }, 401);
-    if (url.pathname === "/mcp") response.headers.set("www-authenticate", 'Bearer realm="apple-health-mcp"');
+    if (url.pathname === "/mcp") response.headers.set("www-authenticate", `Bearer realm="${MCP_SERVER_NAME}"`);
     return response;
   }
   if (url.pathname === "/ingest" && req.method === "POST") return ingest(req, ctx);

@@ -90,6 +90,7 @@ if (isMainModule()) {
     const options = parseArgs(process.argv.slice(2));
     if (options.help || !options.file) {
       console.error("Usage: node src/cli/import-apple-health.js <export.xml|export.zip> [--chunk-url URL] [--token TOKEN] [--time-zone TZ] [--dates-per-chunk N]");
+      console.error("Prefer HEALTH_INGEST_TOKEN in the environment over --token. A token on the command line is visible to other users on the machine.");
       process.exit(options.help ? 0 : 1);
     }
     const result = await runImport(options);
