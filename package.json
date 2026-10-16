@@ -1,6 +1,6 @@
 {
   "name": "@airbloomer/health-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-hosted health data endpoint. Works with data exported from Apple Health and Android Health Connect, and serves daily summaries.",
   "keywords": [
     "health-data",
@@ -20,5 +20,25 @@
   "dependencies": {
     "better-sqlite3": "^11.10.0",
     "pg": "^8.16.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Airbloomer/health-mcp.git"
+  },
+  "homepage": "https://github.com/Airbloomer/health-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Airbloomer/health-mcp/issues"
+  },
+  "files": [
+    "src",
+    "migrations",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
   }
 }

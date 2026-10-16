@@ -7,9 +7,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
 jobs:
   test:
+    if: ${{ !github.event.release.prerelease && !github.event.release.draft && startsWith(github.event.release.tag_name, 'v') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -26,6 +32,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     environment: npm # required reviewer gate
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # npm trusted publishing (OIDC) + provenance
@@ -33,12 +40,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
       # No dependency install in this job: nothing third-party runs alongside the OIDC token.
       - run: npm install -g npm@11.21.1 --ignore-scripts
+      - name: Check tag is on main
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main || { echo "Tag $TAG is not on main"; exit 1; }
       - name: Check tag matches package.json version
         env:
           TAG: ${{ github.event.release.tag_name }}
