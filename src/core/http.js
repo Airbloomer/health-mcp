@@ -210,6 +210,8 @@ async function ingestSyncFit(req, ctx) {
 }
 
 async function ingestShortcuts(req, ctx) {
+  const declared = declaredContentLength(req.headers.get("content-length"));
+  if (declared != null && declared > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
   const text = await req.text();
   if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
   let body;

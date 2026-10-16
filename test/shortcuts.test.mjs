@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { redactRequestTarget } from "../src/core/auth.js";
 import { handleRequest } from "../src/core/http.js";
 import { MemoryStorage } from "../src/core/memory.js";
-import { parseShortcuts, shortcutNumber, shortcutsError } from "../src/core/shortcuts.js";
+import { parseShortcuts, shortcutMetric, shortcutNumber, shortcutsError } from "../src/core/shortcuts.js";
 
 const URL_SECRET = "a".repeat(20) + "B_c-".repeat(4);
 const NOW = new Date("2026-10-16T12:00:00Z");
@@ -141,4 +141,26 @@ test("HEALTH_INGEST_URL_TOKEN works on /ingest/shortcuts, write-only and off whe
   assert.equal((await handleRequest(request(`/summary?date=2026-10-14&token=${URL_SECRET}`, { method: "GET", token: "" }), on())).status, 401);
   assert.equal((await handleRequest(request(`/ingest?token=${URL_SECRET}`, { token: "", body: payload }), on())).status, 401);
   assert.equal(redactRequestTarget(`POST /ingest/shortcuts/${URL_SECRET}`, "tok", ""), "POST /ingest/shortcuts/[redacted]");
+});
+
+test("prototype keys are not treated as known types or units", () => {
+  const opts = { timeZone: "UTC", now: NOW };
+  for (const name of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf", "__defineGetter__"]) {
+    assert.equal(shortcutMetric(name), null);
+    assert.equal(shortcutsError({ samples: [{ type: name, value: "1", start: "2026-10-14T09:00:00Z" }] }, opts), "invalid_payload");
+  }
+  assert.equal(parseShortcuts({ samples: [{ type: "__proto__", value: "1", start: "2026-10-14T09:00:00Z" }] }, opts).points.length, 0);
+  for (const unit of ["__proto__", "constructor", "toString"]) {
+    assert.equal(shortcutsError({ samples: [{ type: "weight", value: "70", unit, start: "2026-10-14T09:00:00Z" }] }, opts), "invalid_payload");
+  }
+});
+
+test("POST /ingest/shortcuts rejects an oversized declared Content-Length", async () => {
+  const req = new Request("http://localhost/ingest/shortcuts", {
+    method: "POST",
+    headers: { authorization: "Bearer tok", "content-length": "20000001" },
+    body: "{}",
+  });
+  const response = await handleRequest(req, ctx());
+  assert.equal(response.status, 413);
 });
