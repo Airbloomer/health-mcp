@@ -1,5 +1,5 @@
 /**
- * Tenant-agnostic workflow supply-chain lint for this package.
+ * Workflow supply-chain lint for this package.
  */
 
 function stripYamlComments(text) {

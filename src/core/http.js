@@ -4,8 +4,8 @@ import { redactRequestTarget, tokenClass } from "./auth.js";
 import { assertTimeZone } from "./datetime.js";
 import { hcWebhookError, parseHcWebhook } from "./hc-webhook.js";
 import { canonicalStart, realCalendarDate, workoutLocalDate } from "./health-connect.js";
+import { d1DailyLimitKind } from "./free-tier.js";
 import {
-  isDailyWriteLimitError,
   isMissingWriterError,
   limitsFor,
   resolveLimitsProfile,
@@ -85,7 +85,7 @@ function nearLimit(used, max) {
 
 /**
  * @param {Request} req
- * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, shortcutsSourcePriority?: string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], limitsProfile?: string, adapter?: string, tenantId?: string, storage: object, now?: Date }} ctx
+ * @param {{ token?: string, urlToken?: string, timeZone?: string, storeRaw?: boolean | string, shortcutsSourcePriority?: string, metricAllowlist?: string | string[], mcpAllowedOrigins?: string | string[], limitsProfile?: string, adapter?: string, storage: object, now?: Date }} ctx
  */
 export async function handleRequest(req, ctx) {
   const url = new URL(req.url);
@@ -126,7 +126,7 @@ function limitsRoute(limits) {
 
 async function ingestJson(req, ctx, route, klass, limits) {
   const started = Date.now();
-  const base = { tenant: ctx.tenantId || "self", route: route.id, profile: limits.profile };
+  const base = { route: route.id, profile: limits.profile };
   const declared = declaredContentLength(req.headers.get("content-length"));
   if (declared != null && declared > limits.maxBytes) {
     logLine({ ...base, status: 413, bytes: declared, limit_hit: "bytes" });
@@ -220,10 +220,12 @@ async function ingestJson(req, ctx, route, klass, limits) {
       console.error(JSON.stringify({ schema_outdated: true, route: route.id }));
       return json({ error: "schema_outdated" }, 500);
     }
-    if (isDailyWriteLimitError(error)) {
+    if (error?.code === "D1_DAILY_LIMIT") throw error;
+    const limit = d1DailyLimitKind(error);
+    if (limit) {
       const retryAfter = secondsUntilUtcMidnight(ctx.now instanceof Date ? ctx.now : new Date());
-      logLine({ ...base, status: 429, bytes, limit_hit: "daily_writes" });
-      return json({ error: "daily_write_limit", retry: "after" }, 429, { "retry-after": String(retryAfter) });
+      logLine({ ...base, status: 429, bytes, limit_hit: limit });
+      return json({ error: "daily_limit", limit_hit: limit }, 429, { "retry-after": String(retryAfter) });
     }
     throw error;
   }

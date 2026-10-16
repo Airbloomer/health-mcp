@@ -12,7 +12,8 @@ import { authed, redactRequestTarget, tokenClass } from "../src/core/auth.js";
 import { resetDateTimeFormatCache } from "../src/core/datetime.js";
 import { canonicalStart } from "../src/core/health-connect.js";
 import { handleRequest, json, ROUTES } from "../src/core/http.js";
-import { D1_DAILY_ROW_READ_LIMIT, D1_DAILY_ROW_WRITE_LIMIT, FREE_MAX_BYTES, isDailyWriteLimitError, NODE_MAX_BYTES, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
+import { D1_DAILY_ROW_READ_LIMIT, D1_DAILY_ROW_WRITE_LIMIT, d1DailyLimitKind } from "../src/core/free-tier.js";
+import { FREE_MAX_BYTES, NODE_MAX_BYTES, resolveLimitsProfile, secondsUntilUtcMidnight } from "../src/core/limits.js";
 import { SENSITIVE_METRICS } from "../src/core/metrics.js";
 import { localDate } from "../src/core/parse.js";
 import { parseShortcuts, shortcutDays } from "../src/core/shortcuts.js";
@@ -614,7 +615,7 @@ test("27 route table", async () => {
   }
 });
 
-test("28 hosted config rejects URL tokens on every ingest route", async () => {
+test("28 URL tokens rejected when disabled", async () => {
   const paths = ["/ingest/shortcuts", "/ingest/hc-webhook", "/import/apple-health/chunk", "/import/apple-health"];
   for (const pathname of paths) {
     for (const headers of [{}, { authorization: "" }, { authorization: "Basic abc" }]) {
@@ -739,10 +740,11 @@ test("36 removed ingest paths are redacted in the Node log", async () => {
 test("37 daily write limit uses UTC midnight", async () => {
   const expected = String(secondsUntilUtcMidnight(NOW));
   assert.equal(expected, "43200");
-  assert.equal(isDailyWriteLimitError(new Error(D1_DAILY_ROW_WRITE_LIMIT)), true);
-  assert.equal(isDailyWriteLimitError(new Error(`${D1_DAILY_ROW_READ_LIMIT} See https://developers.cloudflare.com/d1/platform/limits/ for more details.`)), true);
-  assert.equal(isDailyWriteLimitError(new Error("D1 daily quota exceeded")), false);
-  assert.equal(isDailyWriteLimitError(new Error("Exceeded maximum DB size.")), false);
+  assert.equal(d1DailyLimitKind(new Error(`D1_ERROR: ${D1_DAILY_ROW_WRITE_LIMIT}`)), "d1_rows_written");
+  assert.equal(d1DailyLimitKind(new Error(`${D1_DAILY_ROW_READ_LIMIT} See https://developers.cloudflare.com/d1/platform/limits/ for more details.`)), "d1_rows_read");
+  assert.equal(d1DailyLimitKind(new Error("daily_limit_exceeded")), null);
+  assert.equal(d1DailyLimitKind(new Error("D1 daily quota exceeded")), null);
+  assert.equal(d1DailyLimitKind(new Error("Exceeded maximum DB size.")), null);
   await eachBackend(async (backend) => {
     const original = backend.storage.insertIngest.bind(backend.storage);
     backend.storage.insertIngest = async () => {
@@ -752,10 +754,22 @@ test("37 daily write limit uses UTC midnight", async () => {
     };
     const response = await post(backend, "/ingest/shortcuts", shortcutSteps());
     assert.equal(response.status, 429);
-    assert.deepEqual(await response.json(), { error: "daily_write_limit", retry: "after" });
+    assert.deepEqual(await response.json(), { error: "daily_limit", limit_hit: "d1_rows_written" });
     assert.equal(response.headers.get("retry-after"), expected);
     backend.storage.insertIngest = original;
   });
+  const readBackend = openMemory();
+  readBackend.storage.insertIngest = async () => {
+    throw new Error(D1_DAILY_ROW_READ_LIMIT);
+  };
+  const readResponse = await post(readBackend, "/ingest/shortcuts", shortcutSteps());
+  assert.equal(readResponse.status, 429);
+  assert.deepEqual(await readResponse.json(), { error: "daily_limit", limit_hit: "d1_rows_read" });
+  const unmapped = openMemory();
+  unmapped.storage.insertIngest = async () => {
+    throw new Error("daily_limit_exceeded");
+  };
+  await assert.rejects(() => post(unmapped, "/ingest/shortcuts", shortcutSteps()));
 });
 
 test("38 free profile rejects a 300000 byte body", async () => {

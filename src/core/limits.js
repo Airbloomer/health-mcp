@@ -7,7 +7,11 @@ export const OTHER_MAX_BYTES = 65_536;
 export const FREE_MAX_URL_WORKOUTS = 40;
 export const FREE_MAX_BEARER_WORKOUTS = 40;
 export const FREE_MAX_STORED_ROWS = 40;
-/** Raw input records accepted by one request on the free profile. */
+/**
+ * Provisional raw-input cap for the free profile. Bytes for 750 records were measured
+ * at 156,819, under 262,144. CPU time on Cloudflare has not been measured.
+ * Change this constant after that measurement. See docs/limits.md.
+ */
 export const FREE_MAX_INPUT_RECORDS = 750;
 
 export const NODE_MAX_URL_WORKOUTS = 500;
@@ -69,38 +73,6 @@ export function workoutCap(limits, tokenClass) {
 export function secondsUntilUtcMidnight(now = new Date()) {
   const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
   return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
-}
-
-/**
- * D1 daily row limits, matched as documented text rather than keywords.
- * Debug D1, List of D1_ERRORs:
- * https://developers.cloudflare.com/d1/observability/debug-d1/
- * The same sentences, without the trailing "See https://..." line, are in
- * https://developers.cloudflare.com/changelog/post/2026-09-01-d1-free-tier-limit-enforcement/
- * Both reset at midnight UTC. Debug D1 may append
- * " See https://developers.cloudflare.com/d1/platform/limits/ for more details."
- */
-export const D1_DAILY_ROW_WRITE_LIMIT =
-  "Your account has exceeded D1's free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
-export const D1_DAILY_ROW_READ_LIMIT =
-  "Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
-
-const D1_DAILY_LIMIT_MESSAGES = [D1_DAILY_ROW_WRITE_LIMIT, D1_DAILY_ROW_READ_LIMIT];
-
-function errorText(error) {
-  const parts = [];
-  let current = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    if (typeof current === "string") parts.push(current);
-    else if (current.message) parts.push(String(current.message));
-    current = current.cause;
-  }
-  return parts.join("\n");
-}
-
-export function isDailyWriteLimitError(error) {
-  const text = errorText(error);
-  return D1_DAILY_LIMIT_MESSAGES.some((message) => text.includes(message));
 }
 
 export function isMissingWriterError(error) {

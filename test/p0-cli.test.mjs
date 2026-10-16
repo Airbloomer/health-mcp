@@ -81,7 +81,7 @@ test("11 CLI splits 2500 workouts, resumes, and stops on 429", async () => {
     progressFile: path.join(dir, "other.json"),
     fetchImpl: async () => {
       seen += 1;
-      if (seen === 2) return response(429, { error: "daily_write_limit", retry: "after" }, { "retry-after": "120" });
+      if (seen === 2) return response(429, { error: "daily_limit", limit_hit: "d1_rows_written" }, { "retry-after": "120" });
       return response(200, { ok: true, points: 0, workouts: 1, dates: ["2026-10-14"] });
     },
     log: (line) => logs.push(line),

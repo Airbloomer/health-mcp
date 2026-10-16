@@ -24,6 +24,6 @@ npx wrangler deploy
 
 ## Free profile
 
-Self-hosting with the `free` profile accepts 40 workouts, 40 stored rows, 750 raw input records, and 262,144 bytes on one JSON ingest. A request over a cap returns `413` with `retry` set to `split` and writes nothing. A D1 error whose text is the documented daily row read limit or daily row write limit becomes `429 {"error":"daily_write_limit","retry":"after"}` with `Retry-After` until 00:00 UTC.
+Self-hosting with the `free` profile accepts 40 workouts, 40 stored rows, 750 raw input records, and 262,144 bytes on one JSON ingest. The 750 figure is provisional until CPU time is measured; see [limits.md](limits.md). A request over a cap returns `413` with `retry` set to `split` and writes nothing. The documented D1 daily row write limit becomes `429 {"error":"daily_limit","limit_hit":"d1_rows_written"}`. The documented daily row read limit is `429 {"error":"daily_limit","limit_hit":"d1_rows_read"}`. `Retry-After` runs until 00:00 UTC.
 
 Under `free`, one ingest is a single atomic batch. Under `node`, a large ingest can span several batches. A Bearer retry is idempotent and repairs a partial write. On `1102` or `503`, split the batch and retry.
