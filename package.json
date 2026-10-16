@@ -1,0 +1,25 @@
+{
+  "name": "apple-health-mcp",
+  "version": "0.1.0",
+  "description": "Receives Apple Health data from the Health Auto Export iOS app and serves daily summaries.",
+  "keywords": [
+    "Apple Health",
+    "health-auto-export",
+    "healthkit",
+    "mcp",
+    "self-hosted"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/adapters/node.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "pg": "^8.16.3"
+  }
+}

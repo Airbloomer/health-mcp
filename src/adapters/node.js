@@ -1,0 +1,174 @@
+import http from "node:http";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { pathToFileURL } from "node:url";
+import { handleRequest } from "../core/http.js";
+import { MAX_MCP_BYTES } from "../core/mcp.js";
+import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
+import { openPostgres } from "./postgres.js";
+import { createSqliteStorage } from "./sqlite.js";
+
+const POSTGRES_URL = /^postgres(?:ql)?:\/\//i;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * `DATABASE_URL` selects the driver: a postgres URL, or a filesystem path for SQLite.
+ * When it is unset, SQLite uses `SQLITE_PATH` or `./data/health.sqlite`.
+ */
+export async function createNodeStorage(env = process.env) {
+  const databaseUrl = env.DATABASE_URL || "";
+  if (POSTGRES_URL.test(databaseUrl)) return openPostgres(databaseUrl);
+  if (URL_SCHEME.test(databaseUrl)) {
+    throw new Error("DATABASE_URL must be a postgres URL or a SQLite file path");
+  }
+  const filename = databaseUrl || env.SQLITE_PATH || "./data/health.sqlite";
+  return createSqliteStorage(filename);
+}
+
+function writeJson(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    "content-length": Buffer.byteLength(payload),
+  });
+  res.end(payload);
+}
+
+function requestPath(req) {
+  return (req.url || "").split("?")[0];
+}
+
+function bodyLimit(req) {
+  return requestPath(req) === "/mcp" ? MAX_MCP_BYTES : MAX_PAYLOAD_CHARS;
+}
+
+function declaredByteLength(req) {
+  const raw = req.headers["content-length"];
+  if (raw == null) return null;
+  const value = String(Array.isArray(raw) ? raw[0] : raw).trim();
+  if (!/^\d+$/.test(value)) return null;
+  return Number(value);
+}
+
+async function readBody(req) {
+  const chunks = [];
+  let size = 0;
+  const limit = bodyLimit(req);
+  const declared = declaredByteLength(req);
+  if (requestPath(req) === "/mcp" && declared != null && declared > limit) {
+    const error = new Error("payload_too_large");
+    error.code = "PAYLOAD_TOO_LARGE";
+    throw error;
+  }
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) {
+      const error = new Error("payload_too_large");
+      error.code = "PAYLOAD_TOO_LARGE";
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+const SKIP_HEADERS = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive"]);
+
+function toWebRequest(req, body) {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value == null || SKIP_HEADERS.has(key.toLowerCase())) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+    } else {
+      headers.append(key, value);
+    }
+  }
+  const host = req.headers.host || "localhost";
+  const init = { method: req.method || "GET", headers };
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    init.body = body;
+    if (body && typeof body.getReader === "function") init.duplex = "half";
+  }
+  return new Request(`http://${host}${req.url}`, init);
+}
+
+export function startServer({ storage, token = "", timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
+  const server = http.createServer(async (req, res) => {
+    try {
+      let request;
+      if (requestPath(req) === "/import/apple-health" && (req.method || "").toUpperCase() === "POST") {
+        const declared = declaredByteLength(req);
+        if (declared != null && declared > MAX_APPLE_EXPORT_BYTES) {
+          writeJson(res, 413, { error: "payload_too_large" });
+          req.destroy();
+          return;
+        }
+        request = toWebRequest(req, Readable.toWeb(req));
+      } else {
+        const body = await readBody(req);
+        request = toWebRequest(req, body);
+      }
+      const response = await handleRequest(request, { storage, token, timeZone, storeRaw, metricAllowlist, sourcePriority, mcpAllowedOrigins });
+      const payload = Buffer.from(await response.arrayBuffer());
+      const headers = { "content-length": payload.length };
+      response.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+      res.writeHead(response.status, headers);
+      res.end(payload);
+    } catch (error) {
+      if (error?.code === "PAYLOAD_TOO_LARGE") {
+        writeJson(res, 413, { error: "payload_too_large" });
+        req.destroy();
+        return;
+      }
+      console.error(error instanceof Error ? error.message : error);
+      if (!res.headersSent) writeJson(res, 500, { error: "internal" });
+      else res.destroy();
+    }
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => resolve(server));
+  });
+}
+
+function isMainModule() {
+  const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+  return entry === import.meta.url;
+}
+
+if (isMainModule()) {
+  const token = process.env.HEALTH_INGEST_TOKEN || "";
+  const timeZone = process.env.HEALTH_TIMEZONE;
+  const port = Number(process.env.PORT || 8787);
+  const host = process.env.HOST || "0.0.0.0";
+  if (!token) console.error("HEALTH_INGEST_TOKEN is empty; every request will be rejected");
+
+  const storage = await createNodeStorage(process.env);
+  const server = await startServer({
+    storage,
+    token,
+    timeZone,
+    storeRaw: process.env.HEALTH_STORE_RAW,
+    metricAllowlist: process.env.HEALTH_METRIC_ALLOWLIST,
+    sourcePriority: process.env.HEALTH_SOURCE_PRIORITY,
+    mcpAllowedOrigins: process.env.MCP_ALLOWED_ORIGINS,
+    port,
+    host,
+  });
+  const address = server.address();
+  const shown = address && typeof address === "object" ? `${address.address}:${address.port}` : String(port);
+  console.log(`apple-health-mcp listening on ${shown}`);
+
+  const shutdown = () => {
+    server.close(() => {
+      Promise.resolve(storage.close?.()).finally(() => process.exit(0));
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}

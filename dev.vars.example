@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `wrangler dev`. Do not commit .dev.vars.
+HEALTH_INGEST_TOKEN=replace-with-a-long-random-token
+HEALTH_TIMEZONE=UTC
+# HEALTH_STORE_RAW=true
+# HEALTH_METRIC_ALLOWLIST=heart_rate,resting_heart_rate
+# MCP_ALLOWED_ORIGINS=https://example.com

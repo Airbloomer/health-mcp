@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+.secrets/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+*.bak*
+*.key
+*.pem
+wrangler.toml
+data/

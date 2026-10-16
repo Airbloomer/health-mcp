@@ -1,0 +1,30 @@
+# Copy to wrangler.toml and fill in the local values.
+# wrangler.toml is gitignored. Do not commit account ids, database ids, or hostnames.
+name = "apple-health-mcp"
+main = "src/index.js"
+compatibility_date = "2026-09-22"
+workers_dev = true
+preview_urls = false
+
+# Optional. Wrangler uses the account you are logged in to when this is omitted.
+# account_id = "your-cloudflare-account-id"
+
+[vars]
+# IANA zone for timestamps that do not include a numeric offset.
+# Health Auto Export's own timestamps include an offset and do not use this.
+HEALTH_TIMEZONE = "America/Los_Angeles"
+# HEALTH_STORE_RAW = "true"
+# HEALTH_METRIC_ALLOWLIST = "heart_rate,resting_heart_rate"
+# Comma-separated Origin values allowed to call /mcp. Empty rejects every request that sends Origin.
+# MCP_ALLOWED_ORIGINS = "https://example.com"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "apple-health-mcp"
+database_id = "replace-with-d1-database-id"
+migrations_dir = "migrations"
+
+# Optional custom domain. Replace the hostname, then uncomment.
+# [[routes]]
+# pattern = "health.example.com"
+# custom_domain = true

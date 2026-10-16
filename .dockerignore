@@ -1,0 +1,10 @@
+.git
+node_modules
+data
+wrangler.toml
+.dev.vars
+.env
+test
+README.md
+LICENSE
+*.md
