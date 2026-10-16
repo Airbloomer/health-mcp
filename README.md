@@ -2,7 +2,7 @@
 
 **Ask your AI chatbot about your own health data, from a server you own.**
 
-[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Self-host · Node · Docker](https://img.shields.io/badge/self--host-Node%20%C2%B7%20Docker-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
+[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Cloudflare Workers · Node · Docker](https://img.shields.io/badge/runs%20on-Cloudflare%20Workers%20%C2%B7%20Node%20%C2%B7%20Docker-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
 
 ![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
@@ -120,9 +120,11 @@ Full setup for both apps: [Data sources](https://github.com/Airbloomer/health-mc
 <details>
 <summary><strong>iPhone: Apple Shortcuts</strong></summary>
 
-Shortcuts is built into iPhone, so there's no extra app to install. A shortcut reads your Health data and sends it to `https://<your-host>/ingest/shortcuts` with the header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
+Shortcuts is built into iPhone, so there's no extra app to install. A shortcut reads your Health data in daily mode (**Find Health Samples** with **Group By** set to **Day**, one total per metric per day) and sends it to `https://<your-host>/ingest/shortcuts` with the header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
 
 Full setup: [Shortcuts guide](https://github.com/Airbloomer/health-mcp/blob/main/docs/shortcuts.md)
+
+Note: these steps are tested against the server but not yet verified on a device.
 
 Prefer a dedicated app? See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 
