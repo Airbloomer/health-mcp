@@ -25,7 +25,7 @@ const GRAMS_RANGE = [0, 100_000];
  * stored names are both accepted. Other `[a-z0-9_]` names pass through and
  * are kept only when `HEALTH_METRIC_ALLOWLIST` lists them.
  */
-const TYPE_MAP = Object.freeze({
+const TYPE_MAP = Object.freeze(Object.assign(Object.create(null), {
   steps: "step_count",
   step_count: "step_count",
   active_energy: "active_energy",
@@ -45,10 +45,10 @@ const TYPE_MAP = Object.freeze({
   carbs: "carbohydrates",
   total_fat: "total_fat",
   fat: "total_fat",
-});
+}));
 
 const ENERGY_UNITS = new Set(["kcal", "cal", "kj"]);
-const MASS_TO_KG = Object.freeze({ kg: 1, g: 0.001, lb: 0.45359237, lbs: 0.45359237, st: 6.35029318 });
+const MASS_TO_KG = Object.freeze(Object.assign(Object.create(null), { kg: 1, g: 0.001, lb: 0.45359237, lbs: 0.45359237, st: 6.35029318 }));
 const GRAM_METRICS = new Set(["protein", "carbohydrates", "total_fat"]);
 
 function typeKey(value) {
@@ -59,7 +59,8 @@ function typeKey(value) {
 export function shortcutMetric(type) {
   if (typeof type !== "string" || !type.trim()) return null;
   const key = typeKey(type);
-  if (TYPE_MAP[key]) return TYPE_MAP[key];
+  if (Object.hasOwn(TYPE_MAP, key)) return TYPE_MAP[key];
+  if (key in Object.prototype || key.startsWith("__")) return null;
   return /^[a-z0-9_]+$/.test(key) ? key : null;
 }
 
@@ -113,7 +114,7 @@ function normalizedQuantity(metric, qty, unit) {
     return inRange(kcal, ...ENERGY_KCAL_RANGE) ? { qty: kcal, units: "kcal" } : null;
   }
   if (metric === "weight_body_mass") {
-    const factor = MASS_TO_KG[key || "kg"];
+    const factor = Object.hasOwn(MASS_TO_KG, key || "kg") ? MASS_TO_KG[key || "kg"] : null;
     if (!factor || !inRange(qty * factor, ...WEIGHT_KG_RANGE)) return null;
     return { qty: qty * factor, units: "kg" };
   }
