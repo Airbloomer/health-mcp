@@ -88,7 +88,8 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `SQLITE_PATH` | no | Node | SQLite file when `DATABASE_URL` is unset. Default `./data/health.sqlite`. The image sets `/data/health.sqlite`. |
 | `PORT` | no | Node | Default `8787`. |
 | `HOST` | no | Node | Default `0.0.0.0`. |
-| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store each request body in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. `false`, `0`, `no`, and `off` leave it off. Bodies over about 1.5MB are skipped either way, under D1's 2MB row limit. |
+| `HEALTH_LIMITS_PROFILE` | no | Wrangler `[vars]`, or the process environment | `free` or `node`, compared exactly. Cloudflare unset or empty means `free`. Node unset or empty means `node`. `node` on a Worker is allowed only when set explicitly and is logged once. Any other value fails closed: the Worker returns 503, and Node exits 1. Do not set `node` in the Worker example. |
+| `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store the post-filter `{route, points, workouts}` document in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. The original request body is not stored. Documents over about 1.5MB are skipped, under D1's 2MB row limit. |
 | `HEALTH_METRIC_ALLOWLIST` | no | Wrangler `[vars]`, or the process environment | Comma-separated metric names to store in addition to the summary set. |
 | `HEALTH_SHORTCUTS_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Raw-sample mode of `POST /ingest/shortcuts` only. Comma-separated, case-insensitive fragments of source names; the first fragment found in a source name wins that metric-day. Default `watch,iphone`. See [shortcuts.md](shortcuts.md). |
 | `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated `sourceName` values from an export of Apple Health. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
@@ -105,7 +106,7 @@ npm install
 npm test
 ```
 
-`npm test` runs the core against an in-memory storage fake, the Cloudflare adapter against a D1-shaped wrapper over SQLite, and the Node adapter over HTTP with a SQLite file. The Postgres adapter is tested with a fake client that records SQL, so a database server is not required. GitHub Actions runs the same command on pull requests and on pushes to `main`.
+`npm test` runs the core against in-memory storage, the Cloudflare adapter against a D1-shaped wrapper that executes the real SQL on SQLite, and the Node adapter over HTTP. SQL-dependent tests also run on Postgres when `DATABASE_URL` points at Postgres 16. Without that URL they skip locally and print `skip postgres`. In CI a missing database fails the run. GitHub Actions runs the suite under `TZ=UTC` and `TZ=America/Los_Angeles`. No test sets `process.env.TZ`.
 
 ## Layout
 

@@ -14,7 +14,8 @@ import { expectedSummary, summaryChunk, summaryDate } from "./expected.mjs";
 
 test("migration SQL stays portable", () => {
   const files = migrationFiles();
-  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql"]);
+  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql", "0003_workout_writer.sql"]);
+  assert.match(files[2].sql, /ALTER TABLE workouts ADD COLUMN writer TEXT/i);
   for (const file of files) {
     assert.doesNotMatch(file.sql, /AUTOINCREMENT|WITHOUT ROWID|INSERT OR REPLACE|PRAGMA/i);
   }

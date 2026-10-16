@@ -24,7 +24,7 @@ To rotate the token, generate a new value with `openssl rand -hex 32` and replac
 
 Requests without an `Origin` header are allowed. Native clients call `/mcp` that way. A request that sends `Origin` is rejected with `403` unless that origin is listed in `MCP_ALLOWED_ORIGINS`.
 
-`HEALTH_STORE_RAW` defaults to off, so request bodies are not written to `raw_payloads` unless you set it to `true`, `1`, `yes`, or `on`.
+`HEALTH_STORE_RAW` defaults to off, so nothing is written to `raw_payloads` unless you set it to `true`, `1`, `yes`, or `on`. When it is on, the row is the post-filter document of stored points and workouts, not the original request. Removed ingest paths return 410 and logs redact the token segment after `/ingest/<name>/`.
 
 ### Browser-based MCP clients get `403`
 

@@ -64,7 +64,9 @@ The body is an object with a `samples` array, a `workouts` array, or both. Daily
 
 **Errors.** One bad entry rejects the whole request with `400`, for example `{"error":"invalid_payload","at":"samples[12]","field":"start"}`. `at` is the position and `field` the field name. The value you sent is never echoed back. Common causes: a date not in ISO 8601, a value with a thousands separator, an unknown unit, or an `end` before `start`.
 
-**Response.** `{"ok":true,"id":"...","dates":[...],"points":N,"workouts":N,"dropped":N}`. `points` counts stored entries; `dropped` counts entries whose metric is not in the allowlist.
+Send one local day per request. After missed days, catch-up loops oldest first, one request per day, and stops at the first non-2xx. The next run resumes from that day. A 7-day body can exceed the free-tier row cap and return `413` with `retry` set to `split`.
+
+**Response.** `{"ok":true,"id":"...","dates":[...],"points":N,"workouts":N,"dropped":N}`. `points` counts stored entries; `dropped` counts entries whose metric is not in the allowlist. A workout whose start cannot be parsed is omitted and counted in `dropped_workouts`. An empty valid body returns `200` with zero counts and does not write a row.
 
 **Limits.** Same as the other adapters: steps 0 to 1,000,000 per entry, energy 0 to 100,000 kcal, weight 0.5 to 500 kg, body fat 0 to 100 %, dates from 2000-01-01 to two days after the server's today, at most 100,000 entries per request.
 

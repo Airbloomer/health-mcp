@@ -15,7 +15,8 @@
   },
   "scripts": {
     "start": "node src/adapters/node.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "migrate:workout-starts": "node src/cli/migrate-workout-starts.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

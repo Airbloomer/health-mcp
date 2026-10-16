@@ -140,7 +140,7 @@ test("HEALTH_INGEST_URL_TOKEN works on /ingest/shortcuts, write-only and off whe
   assert.equal((await handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { token: URL_SECRET, body: payload }), on())).status, 401);
   assert.equal((await handleRequest(request(`/ingest/shortcuts/${URL_SECRET}`, { method: "GET", token: "" }), on())).status, 401);
   assert.equal((await handleRequest(request(`/summary?date=2026-10-14&token=${URL_SECRET}`, { method: "GET", token: "" }), on())).status, 401);
-  assert.equal((await handleRequest(request(`/ingest?token=${URL_SECRET}`, { token: "", body: payload }), on())).status, 401);
+  assert.equal((await handleRequest(request(`/ingest?token=${URL_SECRET}`, { token: "", body: payload }), on())).status, 410);
   assert.equal(redactRequestTarget(`POST /ingest/shortcuts/${URL_SECRET}`, "tok", ""), "POST /ingest/shortcuts/[redacted]");
 });
 
@@ -236,7 +236,8 @@ test("end before start is rejected with a locator that does not echo input", asy
   const badText = await bad.text();
   assert.deepEqual(JSON.parse(badText), { error: "invalid_payload", at: "samples[0]", field: "value" });
   assert.equal(badText.includes("SENTINEL"), false);
-  assert.deepEqual(shortcutsError({ workouts: [{ start: "x" }] }, { timeZone: "UTC", now: NOW }), { error: "invalid_payload", at: "workouts[0]", field: "start" });
+  assert.equal(shortcutsError({ workouts: [{ start: "x" }] }, { timeZone: "UTC", now: NOW }), null);
+  assert.equal(parseShortcuts({ workouts: [{ start: "x" }] }, { timeZone: "UTC", now: NOW }).workouts.length, 0);
 });
 
 test("a sample crossing midnight counts on its start day", () => {

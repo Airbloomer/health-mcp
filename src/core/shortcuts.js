@@ -1,7 +1,9 @@
 import { aggregateDays } from "./aggregate.js";
+import { zoneOffsetMs } from "./datetime.js";
 import { durationMinutesFromSeconds, toKcal } from "./hk.js";
 import {
   BODY_FAT_PCT_RANGE,
+  canonicalStart,
   clockOptions,
   dateInWindow,
   datedSample,
@@ -88,21 +90,6 @@ export function shortcutNumber(value) {
 }
 
 const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
-
-function zoneOffsetMs(ms, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(ms));
-  const get = (type) => Number(parts.find((part) => part.type === type).value);
-  return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")) - ms;
-}
 
 /** Epoch ms for a wall-clock time in `timeZone`, independent of the host zone. */
 function wallClockInstant(fields, timeZone) {
@@ -218,7 +205,7 @@ function checkWorkout(workout, ctx) {
   if (!isPlainObject(workout)) return fail(null);
   if (workout.type != null && typeof workout.type !== "string") return fail("type");
   const start = shortcutTime(workout.start, ctx);
-  if (!start) return fail("start");
+  if (!start) return { drop: true };
   let seconds = null;
   if (workout.duration != null) {
     seconds = shortcutNumber(workout.duration);
@@ -244,7 +231,7 @@ function checkWorkout(workout, ctx) {
     row: {
       name: exerciseName(workout.type ?? ""),
       // UTC, so the same instant written in different formats is one upsert key.
-      start: new Date(start.ms).toISOString(),
+      start: canonicalStart(workout.start, ctx.timeZone) || new Date(start.ms).toISOString(),
       date: start.date,
       duration_min: durationMinutesFromSeconds(seconds),
       kcal,
@@ -297,6 +284,7 @@ export function shortcutsError(body, options = {}) {
   }
   for (let index = 0; index < workouts.length; index++) {
     const result = checkWorkout(workouts[index], ctx);
+    if (result.drop) continue;
     if (!result.row) return invalid(`workouts[${index}]`, result.field);
   }
   return null;
@@ -312,15 +300,20 @@ export function parseShortcuts(body, options = {}) {
   const ctx = clockOptions(options);
   const points = [];
   const workouts = [];
+  let droppedWorkouts = 0;
   for (const sample of body?.samples || []) {
     const result = checkSample(sample, ctx);
     if (result.row) points.push(result.row);
   }
   for (const workout of body?.workouts || []) {
     const result = checkWorkout(workout, ctx);
+    if (result.drop) {
+      droppedWorkouts += 1;
+      continue;
+    }
     if (result.row) workouts.push(result.row);
   }
-  return { points, workouts };
+  return { points, workouts, droppedWorkouts };
 }
 
 /** `HEALTH_SHORTCUTS_SOURCE_PRIORITY`: comma-separated, case-insensitive name fragments. */

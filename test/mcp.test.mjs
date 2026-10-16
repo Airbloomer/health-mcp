@@ -105,7 +105,7 @@ test("mcp lists only read tools and serves each one", async () => {
   const workouts = await tool(ctx, "list_workouts", { start_date: summaryDate, end_date: summaryDate });
   assert.deepEqual(workouts.structuredContent.workouts, [{
     name: "Traditional Strength Training",
-    start: "2026-10-14 17:30:00 -0700",
+    start: "2026-10-15T00:30:00.000Z",
     date: summaryDate,
     duration_min: 45,
     kcal: 310,

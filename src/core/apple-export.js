@@ -1,6 +1,7 @@
 import { storedMetricSet } from "./aggregate.js";
 import { durationMinutesFromSeconds, hkQuantityMetric, hkWorkoutName, quantitySample, toKcal } from "./hk.js";
 import { DEFAULT_TIME_ZONE, LATEST_METRICS } from "./metrics.js";
+import { canonicalStart, workoutLocalDate } from "./health-connect.js";
 import { localDate } from "./parse.js";
 
 const MAX_TAG_CHARS = 1_000_000;
@@ -261,8 +262,9 @@ export function createAppleExportParser(options = {}) {
     if (!Number.isFinite(kcal)) kcal = null;
     if (kcal != null) kcal = Math.round(toKcal(kcal, attrs.totalEnergyBurnedUnit));
     const name = flatString(hkWorkoutName(attrs.workoutActivityType || ""));
-    const start = flatString(attrs.startDate);
-    const day = flatString(date);
+    const start = canonicalStart(attrs.startDate, timeZone);
+    if (!start) return;
+    const day = flatString(workoutLocalDate(attrs.startDate, timeZone, start) || date);
     workouts.set(`${name}\0${start}`, {
       name,
       start,

@@ -16,7 +16,7 @@ export const summaryChunk = {
   workouts: [
     {
       name: "Traditional Strength Training",
-      start: "2026-10-14 17:30:00 -0700",
+      start: "2026-10-15T00:30:00.000Z",
       date: summaryDate,
       duration_min: 45,
       kcal: 310,
@@ -38,7 +38,7 @@ export const expectedSummary = {
   workouts: [
     {
       name: "Traditional Strength Training",
-      start: "2026-10-14 17:30:00 -0700",
+      start: "2026-10-15T00:30:00.000Z",
       duration_min: 45,
       kcal: 310,
     },

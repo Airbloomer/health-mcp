@@ -18,6 +18,8 @@ preview_urls = false
 # npx wrangler secret put HEALTH_INGEST_URL_TOKEN
 
 [vars]
+# Leave HEALTH_LIMITS_PROFILE unset on a Worker. Unset or empty means the free profile.
+# Do not set node here. An unknown value fails closed with 503.
 # IANA zone for timestamps that do not include a numeric offset.
 # A timestamp that already includes an offset does not use this.
 HEALTH_TIMEZONE = "America/Los_Angeles"

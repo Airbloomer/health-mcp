@@ -54,7 +54,7 @@ Then create the database tables. Do this **before** you deploy:
 npx wrangler d1 migrations apply health-mcp --remote
 ```
 
-✅ **Checkpoint:** the command lists `0001_init.sql` and `0002_daily_points.sql` as applied, with no error.
+✅ **Checkpoint:** the command lists `0001_init.sql`, `0002_daily_points.sql`, and `0003_workout_writer.sql` as applied, with no error. Apply `0003` before deploying code that uses the `writer` column. Confirm it with `PRAGMA table_info(workouts)`, then `npx wrangler deploy`. See [Deploy runbook](docs/deploy-runbook.md).
 
 Prefer your own machine, a VPS, or Docker? See [Self-hosting](https://github.com/Airbloomer/health-mcp/blob/main/docs/self-hosting.md) for the Node.js and Docker options (SQLite or Postgres).
 

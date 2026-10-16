@@ -1,3 +1,4 @@
+import { formatLocalDate } from "./datetime.js";
 import { DEFAULT_TIME_ZONE } from "./metrics.js";
 
 // "2026-10-15 07:00:00 -0700" or ISO. Offset-bearing timestamps keep the
@@ -13,10 +14,5 @@ export function localDate(value, timeZone = DEFAULT_TIME_ZONE) {
   if (Number.isNaN(date.getTime())) {
     return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : null;
   }
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: timeZone || DEFAULT_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  return formatLocalDate(date, timeZone || DEFAULT_TIME_ZONE);
 }

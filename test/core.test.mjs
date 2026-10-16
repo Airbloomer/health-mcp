@@ -181,7 +181,13 @@ test("HEALTH_STORE_RAW defaults to off", async () => {
   });
   assert.equal(stored.status, 200);
   assert.equal(on.payloads.length, 1);
-  assert.equal(on.payloads[0].payload, body);
+  const storedPayload = JSON.parse(on.payloads[0].payload);
+  assert.equal(storedPayload.route, "hc-webhook");
+  assert.equal(storedPayload.points[0].metric, "step_count");
+  assert.equal(storedPayload.points[0].sum_qty, 42);
+  assert.deepEqual(storedPayload.workouts, []);
+  assert.equal(storedPayload.points[0].last_ts.includes("2026-10-14T16:00:00Z"), true);
+  assert.equal(JSON.stringify(storedPayload).includes("app_version"), false);
 });
 
 test("allowlist stores extra metrics and raw storage can be turned off", async () => {
@@ -242,14 +248,14 @@ test("removed ingest routes match any other unknown route", async () => {
   ];
   for (const pathname of paths) {
     const response = await handleRequest(request(pathname, { method: "POST", body: "{}" }), ctx);
-    assert.equal(response.status, unknown.status, pathname);
-    assert.deepEqual(await response.json(), { error: "not_found" }, pathname);
+    assert.equal(response.status, 410, pathname);
+    assert.deepEqual(await response.json(), { error: "gone" }, pathname);
   }
 });
 
 test("a raw payload over 1.5MB is not stored", async () => {
   const storage = new MemoryStorage();
-  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z") };
+  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z"), limitsProfile: "node", adapter: "node" };
   const body = {
     timestamp: "2026-10-16T12:00:00Z",
     app_version: "1.2.3",
