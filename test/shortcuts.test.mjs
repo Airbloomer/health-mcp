@@ -330,11 +330,15 @@ for (const [label, make] of [
 ]) {
   test(`${label}: a Bearer daily total replaces the metric-day whatever app wrote it`, async () => {
     const storage = await make();
-    const hae = { data: { metrics: [{ name: "step_count", units: "count", data: [
-      { date: "2026-10-14 09:00:00 -0700", qty: 6000 },
-      { date: "2026-10-14 10:00:00 -0700", qty: 3000 },
-    ] }] } };
-    assert.equal((await handleRequest(request("/ingest", { body: JSON.stringify(hae) }), ctx(storage))).status, 200);
+    const prior = {
+      timestamp: "2026-10-16T12:00:00Z",
+      app_version: "1.2.3",
+      steps: [
+        { count: 6000, start_time: "2026-10-14T16:00:00Z", end_time: "2026-10-14T17:00:00Z" },
+        { count: 3000, start_time: "2026-10-14T17:00:00Z", end_time: "2026-10-14T18:00:00Z" },
+      ],
+    };
+    assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(prior) }), ctx(storage))).status, 200);
     assert.equal((await storage.queryDaySummary("2026-10-14")).steps, 9000);
     const { viaBearer, viaUrl } = await shortcutsFlow(storage);
     assert.equal((await viaUrl({ samples: [{ kind: "daily", type: "Steps", value: "1", date: "2026-10-14" }] })).status, 200);

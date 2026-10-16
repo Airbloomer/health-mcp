@@ -4,7 +4,6 @@ import { activeUrlToken, authed, redactRequestTarget, resetUrlTokenWarnings } fr
 import { exerciseName } from "../src/core/health-connect.js";
 import { parseHcWebhook } from "../src/core/hc-webhook.js";
 import { handleRequest } from "../src/core/http.js";
-import { parseLifeDashboard } from "../src/core/life-dashboard.js";
 import { MemoryStorage } from "../src/core/memory.js";
 import { summaryDate } from "./expected.mjs";
 
@@ -64,66 +63,6 @@ function hcBody(steps = [4000, 5321]) {
     ],
     bmi: [{ value: 24.2, time: "2026-10-14T21:00:00Z", weight_kg: 81.7, height_meters: 1.84 }],
   };
-}
-
-function lifeBody({ steps = 9321, daily = true, rawSteps = [1, 2] } = {}) {
-  const body = {
-    timestamp: "2026-10-16T12:00:00.481Z",
-    app_version: "1.23.0",
-    source: "health_connect",
-    sequence: 1842,
-    steps: rawSteps.map((count, index) => ({
-      uuid: `00000000-0000-4000-8000-00000000000${index}`,
-      source: "com.example.watch",
-      count,
-      start_time: `2026-10-14T${String(8 + index).padStart(2, "0")}:00:00Z`,
-      end_time: `2026-10-14T${String(9 + index).padStart(2, "0")}:00:00Z`,
-    })),
-    heart_rate: [{
-      uuid: "00000000-0000-4000-8000-000000000099#1",
-      source: "com.example.watch",
-      bpm: 61,
-      time: "2026-10-14T06:58:00Z",
-    }],
-    weight: [{ uuid: "00000000-0000-4000-8000-000000000010", source: "com.example.scale", kilograms: 81.7, time: "2026-10-14T07:00:00Z" }],
-    body_fat: [{ uuid: "00000000-0000-4000-8000-000000000011", source: "com.example.scale", percentage: 18.4, time: "2026-10-14T07:00:00Z" }],
-    nutrition: [{
-      uuid: "00000000-0000-4000-8000-000000000012",
-      source: "com.example.food",
-      calories: 1200.5,
-      protein_grams: 40,
-      carbs_grams: 120,
-      fat_grams: 35,
-      dietary_fibre_g: 6.2,
-      sodium_mg: 180,
-      name: "Synthetic meal",
-      meal_type: "breakfast",
-      start_time: "2026-10-14T08:00:00Z",
-      end_time: "2026-10-14T08:20:00Z",
-    }],
-    basal_metabolic_rate: [{ uuid: "00000000-0000-4000-8000-000000000013", source: "com.example.watch", kilocalories_per_day: 1750, time: "2026-10-14T00:00:00Z" }],
-    exercise: [
-      { uuid: "00000000-0000-4000-8000-000000000014", source: "com.example.watch", type: "56", start_time: "2026-10-14T17:30:00Z", end_time: "2026-10-14T18:15:00Z", duration_seconds: 2700, segments: [{ type: "51", start_time: "2026-10-14T17:30:00Z", end_time: "2026-10-14T17:31:00Z", repetitions: 5 }] },
-      { uuid: "00000000-0000-4000-8000-000000000015", source: "com.example.watch", type: "running", start_time: "2026-10-14T19:00:00Z", end_time: "2026-10-14T19:20:00Z", duration_seconds: 1200 },
-    ],
-    sleep: [{
-      uuid: "00000000-0000-4000-8000-000000000016",
-      source: "com.example.watch",
-      session_end_time: "2026-10-14T06:30:00Z",
-      duration_seconds: 28800,
-      stages: [],
-    }],
-  };
-  if (daily) {
-    body.daily_totals = [{
-      date: summaryDate,
-      steps,
-      distance_meters: 7100,
-      active_calories: 500,
-      total_calories: 2250,
-    }];
-  }
-  return body;
 }
 
 test("exercise type decimals and names match Health Connect constants", () => {
@@ -225,7 +164,7 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   const off = ctx(storage);
   const disabledQuery = await handleRequest(request("/ingest/hc-webhook?token=tok", { token: "", body: JSON.stringify(hcBody([9])) }), off);
   assert.equal(disabledQuery.status, 401);
-  const disabledPath = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 9, rawSteps: [] })) }), off);
+  const disabledPath = await handleRequest(request("/ingest/shortcuts/tok", { token: "", body: "{}" }), off);
   assert.equal(disabledPath.status, 401);
   assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), { HEALTH_INGEST_TOKEN: "tok" }), false);
   assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), ""), false);
@@ -252,12 +191,12 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   const path = await handleRequest(request(`/ingest/hc-webhook/${URL_SECRET}`, { token: "", body: JSON.stringify(hcBody([9, 1])) }), environment);
   assert.equal(path.status, 200);
   assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10);
-  const life = await handleRequest(request(`/ingest/life-dashboard/${URL_SECRET}`, { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: `${URL_SECRET}` }));
-  assert.equal(life.status, 200);
+  const removed = await handleRequest(request(`/ingest/life-dashboard/${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { urlToken: `${URL_SECRET}` }));
+  assert.equal(removed.status, 401);
 
   const wrongBearer = await handleRequest(request(`/ingest/hc-webhook?token=${URL_SECRET}`, { token: "nope", body: "{}" }), environment);
   assert.equal(wrongBearer.status, 401);
-  const encodedKey = await handleRequest(request(`/ingest/life-dashboard?%74oken=${URL_SECRET}`, { token: "", body: "{}" }), environment);
+  const encodedKey = await handleRequest(request(`/ingest/hc-webhook?%74oken=${URL_SECRET}`, { token: "", body: "{}" }), environment);
   assert.equal(encodedKey.status, 401);
   assert.equal(redactRequestTarget("POST /ingest/hc-webhook?%74oken=s3cret-value failed", "s3cret-value").includes("s3cret-value"), false);
   assert.equal(
@@ -286,10 +225,8 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
     ["PUT", `/ingest/hc-webhook?token=${URL_SECRET}`],
     ["DELETE", `/ingest/hc-webhook?token=${URL_SECRET}`],
     ["GET", `/ingest/hc-webhook/${URL_SECRET}`],
-    ["GET", `/ingest/life-dashboard?token=${URL_SECRET}`],
-    ["PUT", `/ingest/life-dashboard/${URL_SECRET}`],
-    ["DELETE", `/ingest/life-dashboard?token=${URL_SECRET}`],
-    ["POST", `/ingest/life-dashboard/${URL_SECRET}/extra`],
+    ["POST", `/ingest/life-dashboard/${URL_SECRET}`],
+    ["POST", `/ingest/${URL_SECRET}`],
   ];
   for (const [method, pathname] of denied) {
     const body = method === "GET" || method === "DELETE" ? undefined : "{}";
@@ -312,15 +249,14 @@ test("encoded, padded, short, and reused URL tokens are rejected", async () => {
   const hyphenEncoded = URL_SECRET.replace("-", "%2D");
   const rejected = [
     `/ingest/hc-webhook/${encodedPath}`,
-    `/ingest/life-dashboard/${encodedPath}`,
     `/ingest/hc-webhook/${hyphenEncoded}`,
     `/ingest/hc-webhook/${URL_SECRET}%20`,
-    `/ingest/life-dashboard/${URL_SECRET}%20`,
     `/ingest/hc-webhook?token=${encodedPath}`,
     `/ingest/hc-webhook?token=${URL_SECRET}%20`,
     `/ingest/hc-webhook?token=%20${URL_SECRET}`,
     `/ingest/hc-webhook?%74oken=${URL_SECRET}`,
-    `/ingest/life-dashboard?%74oken=${URL_SECRET}`,
+    `/ingest/life-dashboard/${encodedPath}`,
+    `/ingest/life-dashboard/${URL_SECRET}%20`,
   ];
   for (const pathname of rejected) {
     const response = await handleRequest(request(pathname, { token: "", body: "{}" }), environment);
@@ -346,7 +282,7 @@ test("encoded, padded, short, and reused URL tokens are rejected", async () => {
 
     const reused = await handleRequest(request(`/ingest/hc-webhook/${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { token: URL_SECRET, urlToken: URL_SECRET }));
     assert.equal(reused.status, 401);
-    const paddedBearer = await handleRequest(request(`/ingest/life-dashboard?token=${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { token: `  ${URL_SECRET}  `, urlToken: URL_SECRET }));
+    const paddedBearer = await handleRequest(request(`/ingest/hc-webhook?token=${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { token: `  ${URL_SECRET}  `, urlToken: URL_SECRET }));
     assert.equal(paddedBearer.status, 401);
     const warning = logs.join("\n");
     assert.match(warning, /HEALTH_INGEST_URL_TOKEN matches HEALTH_INGEST_TOKEN/);
@@ -355,151 +291,6 @@ test("encoded, padded, short, and reused URL tokens are rejected", async () => {
     console.error = original;
     resetUrlTokenWarnings();
   }
-});
-
-test("Life Dashboard uses daily totals and a same-size resend replaces the running total", async () => {
-  const parsed = parseLifeDashboard(lifeBody());
-  assert.equal(parsed.points.filter((point) => point.metric === "step_count").reduce((sum, point) => sum + point.qty, 0), 9321);
-  assert.equal(parsed.points.filter((point) => point.metric === "step_count").length, 1);
-  assert.deepEqual(parsed.workouts.map((workout) => [workout.name, workout.kcal]), [["Running", null], ["Running", null]]);
-
-  const storage = new MemoryStorage();
-  const environment = ctx(storage);
-  const response = await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(lifeBody()) }), environment);
-  assert.equal(response.status, 200);
-  const summary = await storage.queryDaySummary(summaryDate);
-  assert.equal(summary.steps, 9321);
-  assert.equal(summary.active_kcal, 500);
-  assert.equal(summary.basal_kcal, 1750);
-  assert.equal(summary.dietary_kcal, 1200.5);
-  assert.deepEqual(summary.weight, { value: 81.7, units: "kg" });
-  assert.equal(summary.body_fat_pct, 18.4);
-  assert.equal(summary.workouts[0].name, "Running");
-  assert.equal((await storage.listMetrics()).includes("dietary_fibre_g"), false);
-  assert.equal((await storage.listMetrics()).includes("distance"), false);
-  assert.equal(storage.payloads.length, 0);
-
-  const updated = await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(lifeBody({ steps: 10000 })) }), environment);
-  assert.equal(updated.status, 200);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10000);
-
-  const rawOnly = lifeBody({ daily: false, rawSteps: [4000, 5321] });
-  const rawStorage = new MemoryStorage();
-  await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(rawOnly) }), ctx(rawStorage));
-  assert.equal((await rawStorage.queryDaySummary(summaryDate)).steps, 9321);
-  const partial = lifeBody({ daily: false, rawSteps: [5] });
-  await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(partial) }), ctx(rawStorage));
-  assert.equal((await rawStorage.queryDaySummary(summaryDate)).steps, 9321);
-  const dailyAfterRaw = lifeBody({ steps: 10000, rawSteps: [] });
-  await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(dailyAfterRaw) }), ctx(rawStorage));
-  assert.equal((await rawStorage.queryDaySummary(summaryDate)).steps, 9321);
-
-  const buckets = {
-    timestamp: "2026-10-16T12:00:00Z",
-    app_version: "1.23.0",
-    source: "health_connect",
-    sequence: 9,
-    _resolutions: { steps: "1h", heart_rate: "1m" },
-    steps: [{ bucket_start: "2026-10-14T08:00:00Z", bucket_end: "2026-10-14T09:00:00Z", sample_count: 12, total: 1840, complete: true }],
-    heart_rate: [{ bucket_start: "2026-10-14T08:00:00Z", bucket_end: "2026-10-14T08:01:00Z", sample_count: 58, avg: 72.4, min: 66, max: 81, sources: ["com.example.watch"] }],
-  };
-  const bucketStorage = new MemoryStorage();
-  await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(buckets) }), ctx(bucketStorage, { metricAllowlist: "heart_rate" }));
-  assert.equal((await bucketStorage.queryDaySummary(summaryDate)).steps, 1840);
-  assert.equal((await bucketStorage.queryMetricRange("heart_rate", summaryDate, summaryDate))[0].sum_qty, 72.4);
-});
-
-test("Life Dashboard route keeps Health Auto Export on /ingest and rejects screen time", async () => {
-  const storage = new MemoryStorage();
-  const environment = ctx(storage);
-  const ingested = await handleRequest(request("/ingest", { body: JSON.stringify(lifeBody()) }), environment);
-  assert.equal(ingested.status, 200);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9321);
-
-  const hc = new MemoryStorage();
-  const hcResponse = await handleRequest(request("/ingest", { body: JSON.stringify(hcBody()) }), ctx(hc));
-  assert.equal(hcResponse.status, 200);
-  assert.equal((await hc.queryDaySummary(summaryDate)).steps, 9321);
-
-  const ping = await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({
-      test: true,
-      message: "Test ping from Life Dashboard Companion",
-      timestamp: "2026-10-16T12:00:00Z",
-      app_version: "1.23.0",
-      source: "health_connect",
-    }),
-  }), environment);
-  assert.equal(ping.status, 200);
-  assert.equal((await ping.json()).points, 0);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9321);
-
-  const deleted = await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({
-      timestamp: "2026-10-16T12:05:00Z",
-      app_version: "1.23.0",
-      source: "health_connect",
-      sequence: 1843,
-      deleted_records: [{ type: "steps", uuid: "00000000-0000-4000-8000-000000000000" }],
-    }),
-  }), environment);
-  assert.equal(deleted.status, 200);
-  assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9321);
-
-  const screen = await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({
-      timestamp: "2026-10-16T12:00:00Z",
-      app_version: "1.23.0",
-      source: "screen_time",
-      sequence: 3,
-      screen_time: [{ date: summaryDate, total_screen_time_minutes: 10, apps: [] }],
-    }),
-  }), environment);
-  assert.equal(screen.status, 400);
-
-  const zoned = new MemoryStorage();
-  await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({
-      timestamp: "2026-10-16T12:00:00Z",
-      app_version: "1.23.0",
-      source: "health_connect",
-      sequence: 4,
-      steps: [{
-        uuid: "00000000-0000-4000-8000-000000000020",
-        source: "com.example.watch",
-        count: 6,
-        start_time: "2026-10-14T18:00:00Z",
-        end_time: "2026-10-14T19:00:00Z",
-        metadata: { zone_offset: "+10:00", recording_method: "automatic", last_modified: "2026-10-14T19:00:00Z" },
-      }],
-    }),
-  }), ctx(zoned, { timeZone: "UTC" }));
-  assert.equal((await zoned.queryDaySummary("2026-10-15")).steps, 6);
-
-  const fallback = new MemoryStorage();
-  await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({
-      timestamp: "2026-10-16T12:00:00Z",
-      app_version: "1.23.0",
-      source: "healthkit_ios",
-      sequence: 5,
-      steps: [{ count: 4, start_time: "2026-10-15T05:00:00Z", end_time: "2026-10-15T06:00:00Z", uuid: "a", source: "Watch" }],
-    }),
-  }), ctx(fallback, { timeZone: "America/Los_Angeles" }));
-  assert.equal((await fallback.queryDaySummary("2026-10-14")).steps, 4);
-
-  const denied = await handleRequest(request("/ingest/life-dashboard/nope", { token: "", body: "{}" }), environment);
-  assert.equal(denied.status, 401);
-  const unset = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage()));
-  assert.equal(unset.status, 401);
-
-  const barePing = await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify({ test: true }) }), environment);
-  assert.equal(barePing.status, 400);
-  const pingWithoutVersion = await handleRequest(request("/ingest/life-dashboard", {
-    body: JSON.stringify({ test: true, source: "health_connect", timestamp: "2026-10-16T12:00:00Z" }),
-  }), environment);
-  assert.equal(pingWithoutVersion.status, 200);
-  assert.equal((await pingWithoutVersion.json()).points, 0);
 });
 
 test("Health Connect dates and values stay inside a real window", async () => {
@@ -541,25 +332,4 @@ test("Health Connect dates and values stay inside a real window", async () => {
   const beyond = structuredClone(hcBody([3]));
   beyond.steps = [{ count: 3, start_time: "2026-10-19T00:00:00Z", end_time: "2026-10-19T01:00:00Z" }];
   assert.equal((await handleRequest(request("/ingest/hc-webhook", { body: JSON.stringify(beyond) }), edge)).status, 400);
-
-  const lifeEnvironment = ctx(new MemoryStorage());
-  const badDay = lifeBody({ steps: 9, rawSteps: [] });
-  badDay.daily_totals[0].date = "2026-13-45";
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(badDay) }), lifeEnvironment)).status, 400);
-  const oldDay = lifeBody({ steps: 9, rawSteps: [] });
-  oldDay.daily_totals[0].date = "1999-12-31";
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(oldDay) }), lifeEnvironment)).status, 400);
-  const realDay = lifeBody({ steps: 9, rawSteps: [] });
-  realDay.daily_totals[0].date = "2024-02-29";
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(realDay) }), lifeEnvironment)).status, 200);
-  assert.equal((await lifeEnvironment.storage.queryDaySummary("2024-02-29")).steps, 9);
-  const negativeLife = lifeBody({ steps: -1, rawSteps: [] });
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(negativeLife) }), lifeEnvironment)).status, 400);
-  const heavyLife = lifeBody({ rawSteps: [] });
-  heavyLife.weight = [{ kilograms: 5000, time: "2026-10-14T07:00:00Z", uuid: "w", source: "scale" }];
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(heavyLife) }), lifeEnvironment)).status, 400);
-  const fatLife = lifeBody({ rawSteps: [] });
-  fatLife.body_fat = [{ percentage: -1, time: "2026-10-14T07:00:00Z", uuid: "f", source: "scale" }];
-  assert.equal((await handleRequest(request("/ingest/life-dashboard", { body: JSON.stringify(fatLife) }), lifeEnvironment)).status, 400);
-  assert.equal((await lifeEnvironment.storage.queryDaySummary(summaryDate)).steps, null);
 });

@@ -1,14 +1,11 @@
 import { aggregateDays, shouldStoreRaw, storedMetricSet } from "./aggregate.js";
-import { appleChunkError, looksLikeAppleExport, parseAppleExport } from "./apple-export.js";
+import { appleChunkError, parseAppleExport } from "./apple-export.js";
 import { authed } from "./auth.js";
-import { hcWebhookError, isHcWebhook, parseHcWebhook } from "./hc-webhook.js";
-import { healthExportProError, parseHealthExportPro } from "./health-export-pro.js";
-import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-dashboard.js";
+import { hcWebhookError, parseHcWebhook } from "./hc-webhook.js";
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
 import { DEFAULT_TIME_ZONE, MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "./metrics.js";
-import { localDate, parse, payloadError } from "./parse.js";
+import { localDate } from "./parse.js";
 import { parseShortcuts, shortcutDays, shortcutsError, shortcutsSourcePriority } from "./shortcuts.js";
-import { parseSyncFit, syncFitError } from "./syncfit.js";
 
 export function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -19,7 +16,6 @@ export function json(body, status = 200) {
 
 function ingestKind(pathname) {
   if (pathname === "/ingest/hc-webhook" || /^\/ingest\/hc-webhook\/[^/]+$/.test(pathname)) return "hc-webhook";
-  if (pathname === "/ingest/life-dashboard" || /^\/ingest\/life-dashboard\/[^/]+$/.test(pathname)) return "life-dashboard";
   if (pathname === "/ingest/shortcuts" || /^\/ingest\/shortcuts\/[^/]+$/.test(pathname)) return "shortcuts";
   return null;
 }
@@ -47,13 +43,9 @@ export async function handleRequest(req, ctx) {
     if (url.pathname === "/mcp") response.headers.set("www-authenticate", `Bearer realm="${MCP_SERVER_NAME}"`);
     return response;
   }
-  if (url.pathname === "/ingest" && req.method === "POST") return ingest(req, ctx);
   if (url.pathname === "/import/apple-health" && req.method === "POST") return importApple(req, ctx);
   if (url.pathname === "/import/apple-health/chunk" && req.method === "POST") return importAppleChunk(req, ctx);
-  if (url.pathname === "/ingest/health-export-pro" && req.method === "POST") return ingestHealthExportPro(req, ctx);
-  if (url.pathname === "/ingest/syncfit" && req.method === "POST") return ingestSyncFit(req, ctx);
   if (ingestKind(url.pathname) === "hc-webhook" && req.method === "POST") return ingestHcWebhook(req, ctx);
-  if (ingestKind(url.pathname) === "life-dashboard" && req.method === "POST") return ingestLifeDashboard(req, ctx);
   if (ingestKind(url.pathname) === "shortcuts" && req.method === "POST") return ingestShortcuts(req, ctx);
   if (url.pathname === "/summary" && req.method === "GET") return summary(url, ctx.storage);
   if (url.pathname === "/mcp") return handleMcp(req, ctx);
@@ -129,45 +121,6 @@ async function acceptAppleExport(source, ctx) {
   }
 }
 
-async function ingest(req, ctx) {
-  const bytes = new Uint8Array(await req.arrayBuffer());
-  if (looksLikeAppleExport(bytes)) {
-    if (bytes.byteLength > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
-    return acceptAppleExport(bytes, ctx);
-  }
-  const text = new TextDecoder().decode(bytes);
-  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
-  const timeZone = resolveTimeZone(ctx.timeZone);
-  const healthConnect = adapterOptions(ctx);
-  if (!healthExportProError(body)) return storeParsed(ctx, parseHealthExportPro(body, { timeZone }), text);
-  if (body?.data == null && !syncFitError(body)) return storeParsed(ctx, parseSyncFit(body, { timeZone }), text);
-  if (!lifeDashboardError(body, healthConnect)) return storeParsed(ctx, parseLifeDashboard(body, healthConnect), text);
-  if (isLifeDashboard(body)) return json({ error: "invalid_payload" }, 400);
-  if (!hcWebhookError(body, healthConnect)) return storeParsed(ctx, parseHcWebhook(body, healthConnect), text);
-  if (isHcWebhook(body)) return json({ error: "invalid_payload" }, 400);
-  if (payloadError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parse(body, { timeZone }), text);
-}
-
-async function ingestHealthExportPro(req, ctx) {
-  const text = await req.text();
-  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
-  if (healthExportProError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseHealthExportPro(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
-}
-
 async function ingestHcWebhook(req, ctx) {
   const text = await req.text();
   if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
@@ -180,33 +133,6 @@ async function ingestHcWebhook(req, ctx) {
   const healthConnect = adapterOptions(ctx);
   if (hcWebhookError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
   return storeParsed(ctx, parseHcWebhook(body, healthConnect), text);
-}
-
-async function ingestLifeDashboard(req, ctx) {
-  const text = await req.text();
-  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
-  const healthConnect = adapterOptions(ctx);
-  if (lifeDashboardError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseLifeDashboard(body, healthConnect), text);
-}
-
-async function ingestSyncFit(req, ctx) {
-  const text = await req.text();
-  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
-  if (syncFitError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(ctx, parseSyncFit(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
 }
 
 async function ingestShortcuts(req, ctx) {
