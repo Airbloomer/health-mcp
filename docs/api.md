@@ -134,7 +134,7 @@ A test ping returns 200 and stores nothing only when `test` is true, `source` is
 
 ### iOS Shortcuts
 
-`POST /ingest/shortcuts` takes `{ "samples": [{ "type", "value", "unit", "start", "end" }], "workouts": [{ "type", "start", "end", "duration", "energy", "energyUnit" }] }`, built by Apple's Shortcuts app. Values may be numeric strings; dates must be ISO 8601. One invalid entry rejects the request with `400`. It is not detected on `POST /ingest`. Full field list and setup: [shortcuts.md](shortcuts.md).
+`POST /ingest/shortcuts` takes `{ "samples": [{ "kind", "type", "value", "unit", "start", "end", "source" }], "workouts": [{ "type", "start", "end", "duration", "energy", "energyUnit" }] }`, built with the Shortcuts app. `kind: "daily"` entries are stored as the day total. Raw samples keep one source per metric-day (`HEALTH_SHORTCUTS_SOURCE_PRIORITY`, default `watch,iphone`). Rows from this route replace the stored metric-day instead of using the `n` comparison. Values may be numeric strings; dates must be ISO 8601, and offset-less times are read in `HEALTH_TIMEZONE`. One invalid entry rejects the request with `400` and `{ "error": "invalid_payload", "at": "samples[12]", "field": "start" }`; values are not echoed. The success response adds `dropped`, the number of entries not stored because of the metric allowlist. It is not detected on `POST /ingest`. Full field list and setup: [shortcuts.md](shortcuts.md).
 
 ### `GET /summary?date=YYYY-MM-DD`
 

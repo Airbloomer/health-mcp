@@ -88,6 +88,7 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `HOST` | no | Node | Default `0.0.0.0`. |
 | `HEALTH_STORE_RAW` | no | Wrangler `[vars]`, or the process environment | Store each request body in `raw_payloads`. Default off. Set `true`, `1`, `yes`, or `on` to store it. `false`, `0`, `no`, and `off` leave it off. Bodies over about 1.5MB are skipped either way, under D1's 2MB row limit. |
 | `HEALTH_METRIC_ALLOWLIST` | no | Wrangler `[vars]`, or the process environment | Comma-separated metric names to store in addition to the summary set. |
+| `HEALTH_SHORTCUTS_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Raw-sample mode of `POST /ingest/shortcuts` only. Comma-separated, case-insensitive fragments of source names; the first fragment found in a source name wins that metric-day. Default `watch,iphone`. See [shortcuts.md](shortcuts.md). |
 | `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated `sourceName` values from an export of Apple Health. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
 | `MCP_ALLOWED_ORIGINS` | no | Wrangler `[vars]`, or the process environment | Comma-separated `Origin` values allowed to call `/mcp`. Empty by default, which rejects every request that sends `Origin`. Requests with no `Origin` header stay allowed. |
 
