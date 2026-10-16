@@ -1,5 +1,5 @@
 /**
- * Plan: free tier; upgrade when a real limit is hit.
+ * Defaults fit the Cloudflare free tier. If you hit a limit, see docs/limits.md.
  * D1's free daily row limits reset at 00:00 UTC. This module does not count
  * writes in the isolate and does not sample CPU. Workers timers do not measure CPU.
  *
