@@ -1,0 +1,16 @@
+{
+  "environment": "pilot-analytics",
+  "secret": "PILOT_ANALYTICS_TOKEN",
+  "reviewer_role": "security-reviewer",
+  "required_reviewers": true,
+  "prevent_self_review": true,
+  "ttl_days": 90,
+  "ip_filter": true,
+  "storage": "github_environment_secret",
+  "oidc": false,
+  "repo_secret": false,
+  "org_secret": false,
+  "rotation": "every 90 days, and immediately on any personnel or access change",
+  "rotation_dates": "not issued",
+  "purpose": "read-only Account Analytics counts"
+}

@@ -1,0 +1,3 @@
+name = "dev"
+EVIDENCE_KEY_NAMESPACE = "dev"
+CONSENT_EVIDENCE_KEY_VERSION = "dev-1"

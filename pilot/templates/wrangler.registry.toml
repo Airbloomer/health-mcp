@@ -1,0 +1,26 @@
+name = "hmcp-pilot-registry"
+main = "pilot/registry/worker.js"
+compatibility_date = "2026-09-22"
+account_id = "{{REGISTRY_ACCOUNT_ID}}"
+workers_dev = false
+preview_urls = false
+
+[vars]
+BILLING_TAG = "hmcp-pilot"
+CONSENT_EVIDENCE_KEY_VERSION = "{{EVIDENCE_KEY_VERSION}}"
+
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[[d1_databases]]
+binding = "REGISTRY"
+database_name = "hmcp-pilot-registry"
+database_id = "{{REGISTRY_D1_ID}}"
+migrations_dir = "pilot/registry/migrations"
+
+# Wrangler secret on this Worker only: CONSENT_EVIDENCE_HMAC_KEY_<version>
+# No routes. This Worker is not publicly routable.

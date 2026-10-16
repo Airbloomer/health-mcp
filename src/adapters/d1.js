@@ -1,4 +1,5 @@
 import { shouldStoreRaw } from "../core/aggregate.js";
+import { allowD1Writes } from "../core/free-tier.js";
 import { summarizeDay } from "../core/summary.js";
 import {
   D1_BATCH_LIMIT,
@@ -19,8 +20,9 @@ import {
  * Schema comes from `migrations/` via `wrangler d1 migrations apply`.
  */
 export class D1Storage {
-  constructor(db) {
+  constructor(db, options = {}) {
     this.db = db;
+    this.allowWrites = options.allowWrites ?? allowD1Writes;
   }
 
   async insertIngest(batch) {
@@ -46,8 +48,10 @@ export class D1Storage {
         this.db.prepare(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
       );
     }
-    for (let i = 0; i < statements.length; i += D1_BATCH_LIMIT) {
-      const chunk = statements.slice(i, i + D1_BATCH_LIMIT);
+    const allowed = this.allowWrites(statements.length);
+    const writable = statements.slice(0, allowed);
+    for (let i = 0; i < writable.length; i += D1_BATCH_LIMIT) {
+      const chunk = writable.slice(i, i + D1_BATCH_LIMIT);
       if (chunk.length) await this.db.batch(chunk);
     }
   }

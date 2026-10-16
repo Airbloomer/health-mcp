@@ -1,0 +1,34 @@
+name: pilot-registry
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    environment: registry-admin
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Reviewer is not the triggering actor
+        env:
+          ACTOR: ${{ github.actor }}
+          APPROVERS: ${{ github.event.inputs.approvers }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node pilot/scripts/assert-distinct-reviewer.mjs
+      - name: Registry admin guard
+        env:
+          REGISTRY_ADMIN_TOKEN: ${{ secrets.REGISTRY_ADMIN_TOKEN }}
+        run: node pilot/scripts/registry-admin.mjs
+      - name: Audit alert hook
+        run: node pilot/scripts/audit-alert.mjs --self-test

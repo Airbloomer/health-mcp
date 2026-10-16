@@ -1,0 +1,3 @@
+name = "ci-test"
+EVIDENCE_KEY_NAMESPACE = "ci-test"
+CONSENT_EVIDENCE_KEY_VERSION = "ci-test-1"
