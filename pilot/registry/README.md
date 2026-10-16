@@ -8,7 +8,9 @@ The registry holds no health data, no phone numbers, no plaintext tokens, and no
 
 The SMS consent copy is stored in this database, in `consent_evidence`, as `age` ciphertext. `consents.evidence_ref` points at that row. `evidence_hmac` is HMAC-SHA256 over those stored bytes, keyed by `CONSENT_EVIDENCE_HMAC_KEY_<version>` on the registry Worker only.
 
-Who can read it: the owner role, through the registry Worker. Tenant Workers have no binding to this database.
+Who can read it: the owner role. Tenant Workers have no binding to this database.
+
+The age private key lives with the owner role, outside this repository and outside D1. It is not on the registry Worker, not on a tenant Worker, and not in CI.
 
 Encryption: `age` ciphertext in the column, plus the platform's encryption of D1 at rest.
 

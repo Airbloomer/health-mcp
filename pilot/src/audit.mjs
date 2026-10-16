@@ -1,7 +1,17 @@
 /**
- * Classify a Cloudflare audit event.
+ * PENDING. Required before deploy.
+ * This module does not read the Cloudflare account audit log.
+ * The published schema names action.type and resource.type as strings and does not
+ * list Worker deploy or Worker secret values. The v2 example sets resource.type to "type":
+ * https://developers.cloudflare.com/fundamentals/account/account-security/audit-logs/
+ * https://developers.cloudflare.com/logs/logpush/logpush-job/datasets/account/audit_logs/
+ * The fixtures below are synthetic. They are not those field values.
+ */
+export const AUDIT_ALERT_STATUS = "PENDING";
+
+/**
+ * Classify a synthetic event used by the self-test.
  * Secret changes are matched first so a secret resource is not treated as a deploy.
- * Recognized for every Worker on the account, not only the registry.
  */
 export function classifyAuditEvent(event) {
   const resource = String(event?.resource?.type ?? "").toLowerCase();

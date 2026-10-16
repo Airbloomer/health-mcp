@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertDistinctReviewer } from "../src/reviewer.mjs";
+import { approvedReviewers, assertDistinctReviewer } from "../src/reviewer.mjs";
 
 const policyPath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -11,12 +11,7 @@ const policyPath = path.resolve(
 );
 const policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
 
-async function approversFromEnvOrApi() {
-  const listed = (process.env.APPROVERS || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (listed.length) return listed;
+async function approversFromGitHub() {
   const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPOSITORY;
   const runId = process.env.GITHUB_RUN_ID;
@@ -29,17 +24,12 @@ async function approversFromEnvOrApi() {
     },
   });
   if (!response.ok) return [];
-  const body = await response.json();
-  if (!Array.isArray(body)) return [];
-  return body
-    .filter((item) => item?.state === "approved")
-    .map((item) => item?.user?.login)
-    .filter(Boolean);
+  return approvedReviewers(await response.json());
 }
 
 const actor = process.env.ACTOR || process.env.GITHUB_ACTOR || "";
 try {
-  assertDistinctReviewer({ actor, approvers: await approversFromEnvOrApi(), policy });
+  assertDistinctReviewer({ actor, approvers: await approversFromGitHub(), policy });
 } catch (error) {
   console.error(error.message);
   process.exit(1);

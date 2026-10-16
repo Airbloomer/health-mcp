@@ -1,8 +1,19 @@
 /**
  * The registry-admin environment requires a reviewer who is not the actor.
- * GitHub's prevent-self-review setting is the platform gate; this check fails closed
- * when the recorded approvers are missing or include the person who triggered the run.
+ * Approvers come only from the GitHub approvals API
+ * (`GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals`).
+ * An `APPROVERS` value is not an input. This check fails closed when that
+ * list is missing or includes the person who triggered the run.
  */
+
+/** Logins whose review state is `approved` on a workflow-run approvals payload. */
+export function approvedReviewers(body) {
+  if (!Array.isArray(body)) return [];
+  return body
+    .filter((item) => item?.state === "approved")
+    .map((item) => item?.user?.login)
+    .filter((login) => typeof login === "string" && login.length > 0);
+}
 export function assertDistinctReviewer({ actor, approvers, policy }) {
   if (!policy?.prevent_self_review || !policy?.required_reviewers) {
     throw new Error("registry-admin must require a reviewer other than the person who triggered the run");

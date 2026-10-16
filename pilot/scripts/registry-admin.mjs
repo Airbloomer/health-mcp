@@ -19,9 +19,4 @@ if (!policy.prevent_self_review || !policy.required_reviewers) {
   process.exit(1);
 }
 
-const token = process.env.REGISTRY_ADMIN_TOKEN;
-if (token && process.env.GITHUB_ACTIONS) {
-  console.log(`::add-mask::${token}`);
-}
-
 console.log("registry admin checks passed; deploy is not run");

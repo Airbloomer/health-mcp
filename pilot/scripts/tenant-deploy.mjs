@@ -19,9 +19,4 @@ if (scriptName === REGISTRY_SCRIPT) {
   process.exit(1);
 }
 
-const token = process.env.PILOT_TENANT_DEPLOY_TOKEN;
-if (token && process.env.GITHUB_ACTIONS) {
-  console.log(`::add-mask::${token}`);
-}
-
 console.log("validated tenant target; deploy is not run");

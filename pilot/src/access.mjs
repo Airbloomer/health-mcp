@@ -20,6 +20,11 @@ export function lintAccessDoc(text) {
   if (!text.includes(RESIDUAL_RISK_LINE)) errors.push("residual risk");
   if (!text.includes("2FA is required for every member")) errors.push("2fa");
   if (!text.includes("No Global API Key exists or is in use")) errors.push("global api key");
+  if (!text.includes("AIR-27")) errors.push("air-27");
+  if (!text.includes("must be verified before deploy")) errors.push("verify before deploy");
+  if (!text.includes("has not been verified")) errors.push("unverified access");
+  if (!/Audit alerts[\s\S]*PENDING/.test(text)) errors.push("audit pending");
+  if (!text.includes("required before deploy")) errors.push("required before deploy");
   if (!text.includes(RE_REVIEW_DATE)) errors.push("time-box date");
   if (!text.includes("before tenant 3")) errors.push("tenant 3");
   if (!text.includes("every Worker deploy and every secret change")) errors.push("audit alerts");
@@ -51,5 +56,9 @@ export function assertTokenPolicy(policy) {
   if (!/90 days/.test(policy.rotation || "")) errors.push("rotation");
   if (!/personnel or access change/.test(policy.rotation || "")) errors.push("rotation trigger");
   if (policy.rotation_dates !== "not issued") errors.push("rotation dates");
+  if (policy.github_environment_created !== false) errors.push("environment created");
+  if (policy.prevent_admin_bypass !== true) errors.push("admin bypass");
+  if (policy.deployment_branches !== "main") errors.push("branches");
+  if (policy.required_reviewers !== true || policy.prevent_self_review !== true) errors.push("reviewer");
   if (errors.length) throw new Error(errors.join("; "));
 }

@@ -1,7 +1,7 @@
 # Required before P3.
-# Branch protection must require reviews from the reviewer and security-reviewer role teams before P3.
+# The role teams below are unverified. Branch protection is off.
+# Both are owner actions before P3: confirm the teams, then require their reviews.
 # The ancestor check does not stop a self-merged pin bump.
-# Org team lookup returned 403, so these are role-team slugs.
 
 /pilot/HEALTH_MCP_REF @Airbloomer/reviewer @Airbloomer/security-reviewer
 /.github/workflows/ @Airbloomer/reviewer @Airbloomer/security-reviewer

@@ -18,6 +18,9 @@ concurrency:
 jobs:
   guard:
     runs-on: ubuntu-latest
+    # Owner action before deploy: create this environment. Required reviewer,
+    # prevent_self_review, admin bypass off, deployment branches limited to main.
+    # This workflow does not create the environment.
     environment: pilot-tenant-deploy
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -31,5 +34,6 @@ jobs:
           TENANT_ID: ${{ inputs.tenant_id }}
           PILOT_TENANT_DEPLOY_TOKEN: ${{ secrets.PILOT_TENANT_DEPLOY_TOKEN }}
         run: node pilot/scripts/tenant-deploy.mjs
+      # PENDING. This self-test does not read the Cloudflare audit log.
       - name: Audit alert hook
         run: node pilot/scripts/audit-alert.mjs --self-test

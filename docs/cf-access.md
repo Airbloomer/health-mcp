@@ -4,9 +4,10 @@ Role labels only. This file is the access list for the pilot Cloudflare account.
 
 ## Account members
 
-2FA is required for every member.
+PENDING, tracked as AIR-27. Both checks are required and must be verified before deploy. This file does not record them as done.
 
-No Global API Key exists or is in use.
+- Check, not a recorded fact: 2FA is required for every member. This has not been verified.
+- Check, not a recorded fact: No Global API Key exists or is in use. This has not been verified.
 
 | Role label | Cloudflare role | Second factor |
 | --- | --- | --- |
@@ -88,7 +89,24 @@ Rotation dates: not issued. This phase does not create tokens. The first rotatio
 
 ## Audit alerts
 
-Alerts go to the owner on every Worker deploy and every secret change (create, update, or delete) on the account.
+PENDING. This coverage is required before deploy.
+
+Alerts to the owner on every Worker deploy and every secret change are not wired. `pilot/src/audit.mjs` classifies a synthetic self-test. It does not read the Cloudflare account audit log.
+
+The published schema names `action.type` and `resource.type` as strings. The v2 example sets `resource.type` to `type` and does not list Worker deploy or Worker secret values:
+
+- https://developers.cloudflare.com/fundamentals/account/account-security/audit-logs/
+- https://developers.cloudflare.com/logs/logpush/logpush-job/datasets/account/audit_logs/
+
+Do not treat the self-test fixtures as those field values.
+
+## GitHub environments
+
+This repository does not create GitHub environments. Before any deploy, the owner creates each environment below. Required configuration: a required reviewer, prevent_self_review, admin bypass off, and deployment branches limited to main.
+
+- `registry-admin`
+- `pilot-tenant-deploy`
+- `pilot-analytics`
 
 ## Plan
 

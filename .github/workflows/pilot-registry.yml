@@ -9,6 +9,9 @@ permissions:
 jobs:
   guard:
     runs-on: ubuntu-latest
+    # Owner action before deploy: create this environment. Required reviewer,
+    # prevent_self_review, admin bypass off, deployment branches limited to main.
+    # This workflow does not create the environment.
     environment: registry-admin
     permissions:
       contents: read
@@ -20,15 +23,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      # Approvers come only from the GitHub approvals API. APPROVERS is not read.
       - name: Reviewer is not the triggering actor
         env:
           ACTOR: ${{ github.actor }}
-          APPROVERS: ${{ github.event.inputs.approvers }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node pilot/scripts/assert-distinct-reviewer.mjs
       - name: Registry admin guard
         env:
           REGISTRY_ADMIN_TOKEN: ${{ secrets.REGISTRY_ADMIN_TOKEN }}
         run: node pilot/scripts/registry-admin.mjs
+      # PENDING. This self-test does not read the Cloudflare audit log.
       - name: Audit alert hook
         run: node pilot/scripts/audit-alert.mjs --self-test

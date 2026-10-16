@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { selfTestAlerts } from "../pilot/src/audit.mjs";
+import { AUDIT_ALERT_STATUS, selfTestAlerts } from "../pilot/src/audit.mjs";
 import { lintAccessDoc, readAccessDoc, assertTokenPolicy } from "../pilot/src/access.mjs";
 import {
   BILLING_TAG,
@@ -28,7 +28,7 @@ import {
 } from "../pilot/src/lint.mjs";
 import { applyRegistry, migrationSql, tableColumns, COLUMN_ALLOWLIST } from "../pilot/src/registry.mjs";
 import { maskLines, renderTenant } from "../pilot/src/render.mjs";
-import { assertDistinctReviewer } from "../pilot/src/reviewer.mjs";
+import { approvedReviewers, assertDistinctReviewer } from "../pilot/src/reviewer.mjs";
 import { assertUniqueTokenMeta, generateToken, tokenHashPrefix, TOKEN_PATTERN } from "../pilot/src/tokens.mjs";
 import {
   USAGE_CSV_COLUMNS,
@@ -56,6 +56,10 @@ const ID_B = "m7qk3v2n5p6r4tw2yabc3defgh";
 const ACCOUNT = "acct-tenant-example";
 const D1 = "d1-tenant-example";
 const REGISTRY_ACCOUNT = "acct-registry-example";
+
+function childEnv(extra = {}) {
+  return { PATH: process.env.PATH || "", ...extra };
+}
 
 function fresh() {
   const db = new Database(":memory:");
@@ -355,14 +359,19 @@ test("tokens are random, url-safe, and at least 32 characters", () => {
 });
 
 test("audit hook alerts the owner on deploy and secret change", () => {
+  assert.equal(AUDIT_ALERT_STATUS, "PENDING");
   const alerts = selfTestAlerts();
   assert.ok(alerts.every((alert) => alert.to === "owner"));
   assert.ok(alerts.some((alert) => alert.kind === "worker_deploy"));
   assert.ok(alerts.some((alert) => alert.kind === "secret_change"));
-  const script = spawnSync(process.execPath, ["pilot/scripts/audit-alert.mjs", "--self-test"], { cwd: root, encoding: "utf8" });
+  const script = spawnSync(process.execPath, ["pilot/scripts/audit-alert.mjs", "--self-test"], { cwd: root, encoding: "utf8", env: childEnv() });
   assert.equal(script.status, 0);
   assert.match(script.stdout, /worker_deploy/);
   assert.match(script.stdout, /secret_change/);
+  const access = readAccessDoc();
+  assert.match(access, /Audit alerts[\s\S]*PENDING/);
+  assert.match(access, /required before deploy/);
+  assert.match(access, /does not read the Cloudflare account audit log/);
 });
 
 test("registry-admin reviewer cannot be the triggering actor", () => {
@@ -372,12 +381,19 @@ test("registry-admin reviewer cannot be the triggering actor", () => {
   assert.doesNotThrow(() => assertDistinctReviewer({ actor: "trigger", approvers: ["reviewer"], policy }));
   assert.throws(() => assertDistinctReviewer({ actor: "trigger", approvers: ["trigger"], policy }));
   assert.throws(() => assertDistinctReviewer({ actor: "trigger", approvers: [], policy }));
+  assert.deepEqual(approvedReviewers([
+    { state: "approved", user: { login: "reviewer" } },
+    { state: "rejected", user: { login: "other" } },
+  ]), ["reviewer"]);
+  const source = fs.readFileSync(path.join(root, "pilot/scripts/assert-distinct-reviewer.mjs"), "utf8");
+  assert.equal(source.includes("APPROVERS"), false);
   const script = spawnSync(process.execPath, ["pilot/scripts/assert-distinct-reviewer.mjs"], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, ACTOR: "trigger", APPROVERS: "reviewer" },
+    env: childEnv({ ACTOR: "trigger", APPROVERS: "reviewer", GITHUB_ACTIONS: "true" }),
   });
-  assert.equal(script.status, 0);
+  assert.equal(script.status, 1);
+  assert.match(script.stderr, /required reviewer/);
 });
 
 test("token policies are expiring, IP-filtered environment secrets", () => {
@@ -391,6 +407,10 @@ test("token policies are expiring, IP-filtered environment secrets", () => {
   assert.match(access, /No Global API Key exists or is in use/);
   assert.match(access, /2027-01-31/);
   assert.match(access, /before tenant 3/);
+  assert.match(access, /AIR-27/);
+  assert.match(access, /must be verified before deploy/);
+  assert.match(access, /has not been verified/);
+  assert.match(access, /does not create GitHub environments/);
 });
 
 test("usage query uses cpuTimeUs and lowercase string, and leaves filters as TODOs", () => {
@@ -448,29 +468,40 @@ test("HC Webhook pin is the v1.9.22 release checksum", () => {
 
 test("P3 and P4 stubs exit 1 and tenant deploy does not deploy", () => {
   for (const script of ["provision.mjs", "deprovision.mjs", "export-tenant.mjs"]) {
-    const result = spawnSync(process.execPath, [`pilot/scripts/${script}`], { cwd: root, encoding: "utf8" });
+    const result = spawnSync(process.execPath, [`pilot/scripts/${script}`], { cwd: root, encoding: "utf8", env: childEnv() });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /not implemented/);
   }
-  const denied = spawnSync(process.execPath, ["pilot/scripts/put-tenant-secret.mjs", "OTHER"], { cwd: root, encoding: "utf8" });
+  const denied = spawnSync(process.execPath, ["pilot/scripts/put-tenant-secret.mjs", "OTHER"], { cwd: root, encoding: "utf8", env: childEnv() });
   assert.equal(denied.status, 1);
-  const later = spawnSync(process.execPath, ["pilot/scripts/put-tenant-secret.mjs", "INGEST_TOKEN_HASH"], { cwd: root, encoding: "utf8" });
+  const later = spawnSync(process.execPath, ["pilot/scripts/put-tenant-secret.mjs", "INGEST_TOKEN_HASH"], { cwd: root, encoding: "utf8", env: childEnv() });
   assert.equal(later.status, 1);
   assert.match(later.stderr, /not implemented/);
-  const deploy = spawnSync(process.execPath, ["pilot/scripts/tenant-deploy.mjs"], {
-    cwd: root,
-    encoding: "utf8",
-    env: { ...process.env, TENANT_ID: ID, PILOT_TENANT_DEPLOY_TOKEN: "test-token-value" },
-  });
-  assert.equal(deploy.status, 0);
-  assert.match(deploy.stdout, /deploy is not run/);
-  assert.equal(deploy.stdout.includes("test-token-value"), false);
+  for (const actions of ["true", "false"]) {
+    const deploy = spawnSync(process.execPath, ["pilot/scripts/tenant-deploy.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+      env: childEnv({
+        GITHUB_ACTIONS: actions,
+        TENANT_ID: ID,
+        PILOT_TENANT_DEPLOY_TOKEN: "test-token-value",
+        TZ: "Pacific/Kiritimati",
+      }),
+    });
+    assert.equal(deploy.status, 0, deploy.stderr);
+    assert.match(deploy.stdout, /deploy is not run/);
+    assert.equal(deploy.stdout.includes("test-token-value"), false);
+    assert.equal(deploy.stdout.includes("::add-mask::"), false);
+  }
   const forced = spawnSync(process.execPath, ["pilot/scripts/tenant-deploy.mjs", "--deploy"], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, TENANT_ID: ID },
+    env: childEnv({ TENANT_ID: ID, GITHUB_ACTIONS: "true" }),
   });
   assert.equal(forced.status, 1);
+  for (const file of ["pilot/scripts/tenant-deploy.mjs", "pilot/scripts/registry-admin.mjs"]) {
+    assert.equal(fs.readFileSync(path.join(root, file), "utf8").includes("::add-mask::"), false);
+  }
 });
 
 test("render masks ids and does not print the config", () => {
@@ -503,6 +534,9 @@ test("consolidated spec is the current text", () => {
   assert.match(spec, /2027-01-31/);
   assert.match(spec, /merge-base --is-ancestor/);
   assert.match(spec, /age ciphertext/);
+  assert.match(spec, /age private key lives with the owner role/);
+  assert.match(spec, /AIR-27/);
+  assert.match(spec, /PENDING\. Required before deploy/);
   assert.match(spec, /free tier; upgrade when a real limit is hit/);
   assert.match(spec, /Days 1-15 come from the day-16 pull/);
   assert.match(spec, /required before P3/);
@@ -546,7 +580,42 @@ test("CODEOWNERS is required before P3", () => {
   }
   assert.match(text, /@Airbloomer\/reviewer/);
   assert.match(text, /@Airbloomer\/security-reviewer/);
+  assert.match(text, /unverified/);
+  assert.match(text, /Branch protection is off/);
   assert.equal(text.match(/\b[A-Z][a-z]{2,} [A-Z][a-z]{2,}\b/), null);
+});
+
+test("no tenant or account ids are committed outside the synthetic fixtures", () => {
+  const fixtures = new Set([ID, ID_B]);
+  const files = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else files.push(full);
+    }
+  }
+  walk(root);
+  const accountIds = [];
+  const tenantIds = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (text.includes("\0")) continue;
+    const rel = path.relative(root, file);
+    for (const match of text.matchAll(/\b[0-9a-f]{32}\b/g)) accountIds.push(`${rel}:${match[0]}`);
+    for (const match of text.matchAll(/\b[a-z2-7]{26}\b/g)) {
+      if (rel === "test/pilot.test.mjs" && fixtures.has(match[0])) continue;
+      tenantIds.push(`${rel}:${match[0]}`);
+    }
+  }
+  assert.deepEqual(accountIds, []);
+  assert.deepEqual(tenantIds, []);
 });
 
 test("actor must be a role label or a workflow name", () => {
