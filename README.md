@@ -2,13 +2,11 @@
 
 **Ask your AI chatbot about your own health data, from a server you own.**
 
-[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Deploy · Cloudflare Workers](https://img.shields.io/badge/deploy-Cloudflare%20Workers-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
-
-*[Self-hosted](#quick-start) · read-only MCP · iPhone and Android*
+[![License: MIT](https://img.shields.io/github/license/Airbloomer/health-mcp)](https://github.com/Airbloomer/health-mcp/blob/main/LICENSE) ![Node >=22](https://img.shields.io/badge/node-%3E%3D22-informational) ![MCP · read-only](https://img.shields.io/badge/MCP-read--only-lightgrey) ![Self-host · Node · Docker](https://img.shields.io/badge/self--host-Node%20%C2%B7%20Docker-lightgrey) ![Android · iPhone](https://img.shields.io/badge/Android%20%C2%B7%20iPhone-lightgrey)
 
 ![An AI assistant answering "How did I sleep and train this week?" with health-mcp tool calls (sample data)](https://raw.githubusercontent.com/Airbloomer/health-mcp/main/docs/hero.png)
 
-health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with the Android apps. It runs on a small server that you own, so your data stays with you.
+health-mcp takes the steps, calories, weight, body fat, workouts and nutrition your phone already collects (iPhone or Android) and makes them available to any AI chatbot that supports MCP connectors. Sleep can be added as an option with the Android apps. Your data stays on your server.
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
@@ -179,7 +177,7 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Troubleshooting
 
-- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on the two Android webhook routes, never for `/mcp`.
+- **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on the two Android webhook routes and `/ingest/shortcuts`, never for `/mcp`.
 - **Sending data fails right after deploying.** Run `npx wrangler d1 migrations apply health-mcp --remote`, then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. A later sync with fewer samples for a day does not replace a fuller one. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
