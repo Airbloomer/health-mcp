@@ -192,11 +192,15 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ## Disclaimer
 
-Not affiliated with, endorsed or sponsored by Apple Inc. Apple, Apple Health and HealthKit are trademarks of Apple Inc. Health Auto Export, SyncFit, Health Export Pro, Google, Health Connect, HC Webhook and Life Dashboard Companion are trademarks of their respective owners and are mentioned only to describe compatibility; no endorsement is implied.
+health-mcp is an independent open-source project by Airbloomer, LLC. It is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple, iPhone, Apple Watch, Apple Health, HealthKit and Shortcuts are trademarks of Apple Inc., registered in the U.S. and other countries. They are used here only to describe compatibility.
 
-Not medical advice and not a medical device. This software is for personal informational use only and is not intended to diagnose, treat or prevent any condition. Consult a qualified professional for medical decisions.
+health-mcp is not a medical device and does not provide medical advice, diagnosis or treatment. Talk to a qualified professional about any health decision.
 
-Self-hosted: you run this software and you are responsible for securing your endpoint and your health data. Airbloomer, LLC does not host, receive or access any user data. Provided 'as is' under the MIT License, without warranty.
+health-mcp is self-hosted software. You run it and you control your data, and you are responsible for securing your server. Airbloomer, LLC does not host, receive or access your health data.
+
+Any third-party apps mentioned in this project's docs are owned by their respective owners and are not affiliated with or endorsed by Airbloomer, LLC. Use them under their own terms and privacy policies.
+
+Provided under the license in LICENSE, "as is", without warranty of any kind.
 
 ## Hosted version
 
