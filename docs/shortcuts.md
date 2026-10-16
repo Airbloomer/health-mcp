@@ -1,8 +1,8 @@
-# iPhone: Apple Shortcuts
+# iPhone: the Shortcuts app
 
-A free iPhone option with no extra app. Apple's built-in **Shortcuts** app reads Health with the **Find Health Samples** action and sends the samples to `POST /ingest/shortcuts` with **Get Contents of URL**. A personal automation runs it once a day.
+A free iPhone option with no extra app. The Shortcuts app that comes with iPhone (Apple Shortcuts) reads Health with the **Find Health Samples** action and sends the samples to `POST /ingest/shortcuts` with **Get Contents of URL**. A personal automation runs it once a day.
 
-> **Status: unverified on a real iPhone.** The server side (format, auth, validation) is covered by `test/shortcuts.test.mjs`. The Shortcut steps below use documented Shortcuts actions, but the exact menu wording, the output of Format Date, and the limits have not been checked on a device. Steps marked *(unverified)* are the most likely to differ. Please report what you see.
+> **Status: unverified on a real iPhone.** The server side (format, auth, validation) is covered by `test/shortcuts.test.mjs`. The steps below use documented actions in the Shortcuts app, but the exact menu wording, the output of Format Date, and the limits have not been checked on a device. Steps marked *(unverified)* are the most likely to differ. Please report what you see.
 
 ## Request format
 
@@ -33,7 +33,7 @@ The body is an object with a `samples` array, a `workouts` array, or both.
 
 **Workout fields:** `start` (required), `type` (activity name, for example `Running`), `end` and/or `duration` (seconds, up to two days), `energy` with optional `energyUnit` (`kcal` or `kJ`).
 
-**Dates.** ISO 8601 only: `2026-10-14T09:00:00-07:00`, `2026-10-14T09:00:00-0700`, `2026-10-14T16:00:00Z`, `2026-10-14 09:00:00`, or `2026-10-14`. With an offset, the written calendar day is the stored day. With `Z`, the day comes from `HEALTH_TIMEZONE`. With no offset, the written day is used as is. Locale text such as `Oct 14, 2026 at 9:00 AM` or `14/10/2026` is rejected. In Shortcuts, use **Format Date** with **Date Format** set to **ISO 8601** (see below).
+**Dates.** ISO 8601 only: `2026-10-14T09:00:00-07:00`, `2026-10-14T09:00:00-0700`, `2026-10-14T16:00:00Z`, `2026-10-14 09:00:00`, or `2026-10-14`. With an offset, the written calendar day is the stored day. With `Z`, the day comes from `HEALTH_TIMEZONE`. With no offset, the written day is used as is. Locale text such as `Oct 14, 2026 at 9:00 AM` or `14/10/2026` is rejected. In the Shortcuts app, use **Format Date** with **Date Format** set to **ISO 8601** (see below).
 
 **Validation.** One bad entry rejects the whole request with `400 { "error": "invalid_payload" }`, so a formatting mistake is visible instead of storing part of a day. Limits match the other adapters: steps 0 to 1,000,000 per sample, energy 0 to 100,000 kcal, weight 0.5 to 500 kg, body fat 0 to 100 %, dates from 2000-01-01 to two days after the server's today. At most 100,000 entries per request.
 
@@ -67,7 +67,7 @@ Expect `{"ok":true,...}` and a summary with `steps: 1234`. This writes synthetic
 
 ## Build the Shortcut
 
-Open **Shortcuts**, tap **+** to make a new shortcut, and name it, for example `Health to server`. Build one block per metric (steps shown), then the upload.
+Open the Shortcuts app, tap **+** to make a new shortcut, and name it, for example `Health to server`. Build one block per metric (steps shown), then the upload.
 
 ### 1. One block per metric
 
@@ -104,7 +104,7 @@ If you get `invalid_payload`, the usual causes are a date not formatted as ISO 8
 
 ## Daily automation
 
-1. In Shortcuts, open the **Automation** tab and tap **+** (or **New Automation**).
+1. In the Shortcuts app, open the **Automation** tab and tap **+** (or **New Automation**).
 2. Choose **Time of Day**. Pick a time when the phone is usually unlocked and in use, for example 21:00, and **Daily**.
 3. Turn off **Ask Before Running**. On iOS 17 and later this is shown as choosing **Run Immediately** instead of **Run After Confirmation** *(unverified on each iOS version)*. Optionally turn off **Notify When Run**.
 4. Pick the shortcut `Health to server`.
@@ -114,7 +114,19 @@ The 2-day window resends yesterday each night, so a day sent while still partial
 ## Known limits
 
 - **The phone must be unlocked.** iOS protects Health data while the device is locked. An automation that fires while locked cannot read samples (or may fail); it does not retry later. Choose a time you normally use the phone.
-- **Per-run sample limit.** Find Health Samples, Repeat, and building text for thousands of samples is slow and can hit a Shortcuts limit or time out *(the exact limit is unverified)*. Steps and energy produce many samples per day. Keep the window at 1 to 2 days and send only metrics you store. For a long backfill, use [Export from Apple Health](sources.md) instead.
-- **Slower than the apps.** A Shortcut takes noticeably longer than Health Auto Export or SyncFit and only runs on schedule, not in the background.
+- **Per-run sample limit.** Find Health Samples, Repeat, and building text for thousands of samples is slow and can hit a limit in the Shortcuts app or time out *(the exact limit is unverified)*. Steps and energy produce many samples per day. Keep the window at 1 to 2 days and send only metrics you store. For a long backfill, use [Export from Apple Health](sources.md) instead.
+- **Slower than the apps.** A shortcut takes noticeably longer than Health Auto Export or SyncFit and only runs on schedule, not in the background.
 - **Duplicate sources.** Find Health Samples may return iPhone and Apple Watch samples for the same period; summed metrics can then double-count *(unverified whether Health de-duplicates here)*. If totals look high, add a filter on **Source** to one device.
-- **Units.** The units Shortcuts reports depend on the phone's Health settings. Unknown units are rejected, never guessed.
+- **Units.** The units the Shortcuts app reports depend on the phone's Health settings. Unknown units are rejected, never guessed.
+
+## Disclaimer
+
+health-mcp is an independent open-source project by Airbloomer, LLC. It is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple, iPhone, Apple Watch, Apple Health, HealthKit and Shortcuts are trademarks of Apple Inc., registered in the U.S. and other countries. They are used here only to describe compatibility.
+
+health-mcp is not a medical device and does not provide medical advice, diagnosis or treatment. Talk to a qualified professional about any health decision.
+
+health-mcp is self-hosted software. You run it and you control your data, and you are responsible for securing your server. Airbloomer, LLC does not host, receive or access your health data.
+
+Any third-party apps mentioned in this project's docs are owned by their respective owners and are not affiliated with or endorsed by Airbloomer, LLC. Use them under their own terms and privacy policies.
+
+Provided under the license in LICENSE, "as is", without warranty of any kind.
