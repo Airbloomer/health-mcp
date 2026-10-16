@@ -24,4 +24,4 @@ A URL credential writes points with `n` 0. A later partial URL batch can overwri
 
 Removed ingest paths return `410 {"error":"gone"}` and the access log redacts the token segment.
 
-On the node profile a large request can commit more than one database batch. Retry with Bearer, which is idempotent. A free-tier `1102` means the batch should be split.
+On the node profile a large request can commit more than one database batch. Retry with Bearer, which is idempotent. An `1102` response means the batch should be split and retried.

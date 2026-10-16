@@ -12,7 +12,7 @@ import {
 } from "../core/workout-start-migration.js";
 
 /**
- * Owner-gated backfill. This does not run at startup and is not a deploy step.
+ * Manual backfill. This does not run at startup and is not a deploy step.
  * D1: print SQL for `wrangler d1 execute <db> --remote --file` and do not connect.
  */
 export async function migrateWorkoutStarts(env = process.env, out = console) {

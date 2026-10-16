@@ -1,7 +1,7 @@
 import { canonicalStart } from "./health-connect.js";
 import { DEFAULT_TIME_ZONE } from "./metrics.js";
 
-/** Recorded in schema_migrations when the owner runs the backfill. Not applied at startup. */
+/** Recorded in schema_migrations by `npm run migrate:workout-starts`. Not applied at startup. */
 export const WORKOUT_STARTS_MIGRATION_ID = "0004_workout_starts_js";
 
 export const D1_BATCH_LIMIT = 500;

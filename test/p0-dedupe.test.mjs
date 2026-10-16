@@ -175,8 +175,8 @@ test("D12 legacy start formats match", async () => {
 });
 
 test("D14 duration formula, including the 300s cap", async () => {
-  // The spec example says a 3h ride 250s apart merges. 2% of 3h is 216s, so 250s does not.
-  // The formula wins. Rides long enough for the 300s cap merge at 250s and stay apart at 310s.
+  // 2% of a 3h ride is 216s, so a 250s gap does not merge.
+  // Rides long enough for the 300s cap merge at 250s and stay apart at 310s.
   await eachBackend(async (backend) => {
     await seed(backend, [
       { name: "Three", start: "2026-10-14T08:00:00.000Z", date: DAY, duration_min: 180, kcal: 1, writer: "bearer" },

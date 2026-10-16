@@ -1,4 +1,4 @@
-/** Request limits. `free` is the Workers Free profile. `node` is self-hosted Node and Docker. */
+/** Request limits for self-hosting. `free` is the smaller profile. `node` is the larger Node and Docker profile. */
 
 export const FREE_MAX_BYTES = 262_144;
 export const NODE_MAX_BYTES = 10_000_000;
@@ -7,7 +7,7 @@ export const OTHER_MAX_BYTES = 65_536;
 export const FREE_MAX_URL_WORKOUTS = 40;
 export const FREE_MAX_BEARER_WORKOUTS = 40;
 export const FREE_MAX_STORED_ROWS = 40;
-/** Routine 2-day HC sync upper bound (~600) plus 25%. Binding after the workerd measurement. */
+/** Raw input records accepted by one request on the free profile. */
 export const FREE_MAX_INPUT_RECORDS = 750;
 
 export const NODE_MAX_URL_WORKOUTS = 500;
