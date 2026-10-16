@@ -1,7 +1,0 @@
-{
-  "source": "github_release",
-  "repository": "mcnaveen/health-connect-webhook",
-  "tag": "v1.9.22",
-  "asset": "app-foss-release.apk",
-  "sha256": "53da856ac76dc12c29775ab13b2d683412e65c5da3b1d2b7b48ddf1ee47a9f9b"
-}

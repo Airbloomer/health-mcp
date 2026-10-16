@@ -1,93 +1,66 @@
 /**
- * Pilot plan: free tier; upgrade when a real limit is hit.
- * Workers free CPU is 10 ms per invocation. D1 free writes are 100,000 rows per UTC day.
- * A request that would pass the D1 cap is not written. Signals log once per limit per UTC day.
+ * Plan: free tier; upgrade when a real limit is hit.
+ * D1's free daily row limits reset at 00:00 UTC. This module does not count
+ * writes in the isolate and does not sample CPU. Workers timers do not measure CPU.
+ *
+ * Documented errors (Cloudflare D1, "Debug D1" and the 2026-09-01 changelog):
+ * - Your account has exceeded D1's free tier daily row write limit.
+ * - Your account has exceeded D1's free tier daily row read limit.
+ * https://developers.cloudflare.com/d1/observability/debug-d1/
+ * https://developers.cloudflare.com/changelog/post/2026-09-01-d1-free-tier-limit-enforcement/
  */
 
 export const FREE_TIER_PLAN = "free tier; upgrade when a real limit is hit";
-export const FREE_TIER_CPU_MS = 10;
-export const FREE_TIER_D1_WRITES_PER_DAY = 100_000;
-export const FREE_TIER_APPROACH_RATIO = 0.8;
 
-export function onWorkersRuntime() {
-  return typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers";
-}
+const WRITE_LIMIT = "exceeded D1's free tier daily row write limit";
+const READ_LIMIT = "exceeded D1's free tier daily row read limit";
 
-export function limitSignal({ limit, used, cap }) {
-  if (!(cap > 0) || !(used >= cap * FREE_TIER_APPROACH_RATIO)) return null;
-  return {
-    signal: used >= cap ? "limit_reached" : "limit_approaching",
-    limit,
-    used,
-    cap,
-    plan: FREE_TIER_PLAN,
-  };
-}
-
-function utcDay(now) {
-  return new Date(now).toISOString().slice(0, 10);
-}
-
-export function createFreeTierBudget(options = {}) {
-  const d1Cap = options.d1WritesPerDay ?? FREE_TIER_D1_WRITES_PER_DAY;
-  const cpuCap = options.cpuMs ?? FREE_TIER_CPU_MS;
-  const log = options.log ?? ((line) => console.log(line));
-  const now = options.now ?? (() => new Date());
-  let day = utcDay(now());
-  let writes = 0;
-  const logged = new Set();
-
-  function roll() {
-    const today = utcDay(now());
-    if (today === day) return;
-    day = today;
-    writes = 0;
-    logged.clear();
+export function d1DailyLimitKind(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current === "string") parts.push(current);
+    else if (current.message) parts.push(String(current.message));
+    current = current.cause;
   }
+  const message = parts.join("\n");
+  if (message.includes(WRITE_LIMIT)) return "d1_rows_written";
+  if (message.includes(READ_LIMIT)) return "d1_rows_read";
+  return null;
+}
 
-  function logOnce(signal) {
-    const key = `${day}:${signal.limit}:${signal.signal}`;
-    if (logged.has(key)) return;
-    logged.add(key);
-    log(JSON.stringify(signal));
+export class D1DailyLimitError extends Error {
+  constructor(limit) {
+    super("d1 daily limit");
+    this.name = "D1DailyLimitError";
+    this.code = "D1_DAILY_LIMIT";
+    this.limit = limit;
   }
-
-  return {
-    allowD1Writes(requested) {
-      roll();
-      const count = Math.floor(Number(requested));
-      if (!Number.isFinite(count) || count <= 0) return 0;
-      if (writes + count > d1Cap) {
-        logOnce({
-          signal: "limit_reached",
-          limit: "d1_rows_written",
-          used: writes,
-          cap: d1Cap,
-          plan: FREE_TIER_PLAN,
-        });
-        return 0;
-      }
-      writes += count;
-      const signal = limitSignal({ limit: "d1_rows_written", used: writes, cap: d1Cap });
-      if (signal) logOnce(signal);
-      return count;
-    },
-    noteWorkerCpu(elapsedMs) {
-      roll();
-      const used = Number(elapsedMs);
-      if (!Number.isFinite(used) || used < 0) return;
-      const signal = limitSignal({ limit: "worker_cpu_ms", used, cap: cpuCap });
-      if (signal) logOnce(signal);
-    },
-  };
 }
 
-const shared = createFreeTierBudget();
-
-export function allowD1Writes(count) {
-  return shared.allowD1Writes(count);
+/** Whole seconds until the next 00:00 UTC. The value does not depend on the host zone. */
+export function secondsUntilNextUtcMidnight(now = new Date()) {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }
 
-export function noteWorkerCpu(elapsedMs) {
-  shared.noteWorkerCpu(elapsedMs);
+export function limitNearRecord(names) {
+  return { limit_near: names, plan: FREE_TIER_PLAN };
+}
+
+export function limitHitRecord(limit) {
+  return { limit_hit: limit, plan: FREE_TIER_PLAN };
+}
+
+export function dailyLimitResponse(limit, now = new Date(), log = (line) => console.log(line)) {
+  const record = limitHitRecord(limit);
+  log(JSON.stringify(record));
+  return new Response(JSON.stringify({ error: "daily_limit", limit_hit: limit }), {
+    status: 429,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "retry-after": String(secondsUntilNextUtcMidnight(now)),
+    },
+  });
 }

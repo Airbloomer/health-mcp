@@ -1,81 +1,61 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { test } from "node:test";
+import worker from "../src/adapters/cloudflare.js";
 import { D1Storage } from "../src/adapters/d1.js";
 import { D1_BATCH_LIMIT } from "../src/adapters/statements.js";
 import {
-  FREE_TIER_CPU_MS,
-  FREE_TIER_D1_WRITES_PER_DAY,
   FREE_TIER_PLAN,
-  createFreeTierBudget,
-  onWorkersRuntime,
+  d1DailyLimitKind,
+  limitHitRecord,
+  limitNearRecord,
+  secondsUntilNextUtcMidnight,
 } from "../src/core/free-tier.js";
 
-function logsOf(options = {}) {
-  const lines = [];
-  const budget = createFreeTierBudget({ ...options, log: (line) => lines.push(line) });
-  return { lines, budget };
-}
+const WRITE_LIMIT = "Your account has exceeded D1's free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
+const READ_LIMIT = "Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.";
 
-test("free tier allows a 501-row write and stays under the daily cap", () => {
-  const { lines, budget } = logsOf();
-  assert.equal(FREE_TIER_D1_WRITES_PER_DAY, 100_000);
-  assert.equal(FREE_TIER_CPU_MS, 10);
-  assert.equal(budget.allowD1Writes(D1_BATCH_LIMIT + 1), D1_BATCH_LIMIT + 1);
-  assert.deepEqual(lines, []);
+test("retry-after is seconds until the next 00:00 UTC in any host zone", () => {
+  const utc = new Date("2026-10-16T23:30:00.000Z");
+  const losAngeles = new Date("2026-10-16T16:30:00.000-07:00");
+  assert.equal(utc.toISOString(), losAngeles.toISOString());
+  assert.equal(secondsUntilNextUtcMidnight(utc), 1800);
+  assert.equal(secondsUntilNextUtcMidnight(losAngeles), 1800);
+  assert.equal(secondsUntilNextUtcMidnight(new Date("2026-10-17T00:00:00.000Z")), 86400);
 });
 
-test("free tier logs when a D1 write limit is approached and stops at the cap", () => {
-  const { lines, budget } = logsOf({ d1WritesPerDay: 1000 });
-  assert.equal(budget.allowD1Writes(800), 800);
-  const approaching = JSON.parse(lines[0]);
-  assert.equal(approaching.signal, "limit_approaching");
-  assert.equal(approaching.limit, "d1_rows_written");
-  assert.equal(approaching.used, 800);
-  assert.equal(approaching.cap, 1000);
-  assert.equal(approaching.plan, FREE_TIER_PLAN);
-  assert.equal(budget.allowD1Writes(1), 1);
-  assert.equal(lines.length, 1);
-  assert.equal(budget.allowD1Writes(200), 0);
-  const reached = JSON.parse(lines[1]);
-  assert.equal(reached.signal, "limit_reached");
-  assert.equal(reached.limit, "d1_rows_written");
-  assert.equal(reached.used, 801);
-  assert.equal(reached.cap, 1000);
-  assert.equal(reached.plan, "free tier; upgrade when a real limit is hit");
-  assert.equal(budget.allowD1Writes(199), 199);
-  assert.equal(lines.length, 2);
-  assert.equal(budget.allowD1Writes(1), 0);
+test("documented D1 daily-limit errors are recognized and other errors are not", () => {
+  assert.equal(d1DailyLimitKind(new Error(`D1_ERROR: ${WRITE_LIMIT}`)), "d1_rows_written");
+  assert.equal(d1DailyLimitKind({ cause: { message: READ_LIMIT } }), "d1_rows_read");
+  assert.equal(d1DailyLimitKind(new Error("D1_ERROR: UNIQUE constraint failed")), null);
 });
 
-test("free tier D1 budget resets on the next UTC day", () => {
-  let now = new Date("2026-10-16T23:30:00Z");
-  const { lines, budget } = logsOf({ d1WritesPerDay: 10, now: () => now });
-  assert.equal(budget.allowD1Writes(8), 8);
-  assert.equal(JSON.parse(lines[0]).signal, "limit_approaching");
-  now = new Date("2026-10-17T00:30:00Z");
-  assert.equal(budget.allowD1Writes(8), 8);
-  assert.equal(lines.length, 2);
+test("limit log names are limit_near and limit_hit", () => {
+  assert.deepEqual(limitNearRecord(["rows"]), { limit_near: ["rows"], plan: FREE_TIER_PLAN });
+  assert.deepEqual(limitHitRecord("d1_rows_written"), { limit_hit: "d1_rows_written", plan: FREE_TIER_PLAN });
+  assert.equal(JSON.stringify(limitHitRecord("rows")).includes("limit_reached"), false);
+  assert.equal(JSON.stringify(limitNearRecord(["rows"])).includes("limit_approaching"), false);
+  const source = [
+    "src/core/free-tier.js",
+    "src/adapters/d1.js",
+    "src/adapters/cloudflare.js",
+  ];
+  for (const file of source) {
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    assert.equal(text.includes("limit_approaching"), false, file);
+    assert.equal(text.includes("limit_reached"), false, file);
+    assert.equal(text.includes("performance.now"), false, file);
+    assert.equal(text.includes("allowD1Writes"), false, file);
+  }
+  const api = fs.readFileSync(new URL("../docs/api.md", import.meta.url), "utf8");
+  assert.ok(api.includes(FREE_TIER_PLAN));
+  assert.match(api, /429/);
+  assert.match(api, /limit_hit/);
+  assert.match(api, /limit_near/);
+  assert.doesNotMatch(api, /Workers Paid/);
 });
 
-test("free tier logs when worker CPU approaches 10 ms", () => {
-  const { lines, budget } = logsOf();
-  budget.noteWorkerCpu(7.9);
-  assert.deepEqual(lines, []);
-  budget.noteWorkerCpu(8);
-  const approaching = JSON.parse(lines[0]);
-  assert.equal(approaching.signal, "limit_approaching");
-  assert.equal(approaching.limit, "worker_cpu_ms");
-  assert.equal(approaching.used, 8);
-  assert.equal(approaching.cap, 10);
-  assert.equal(approaching.plan, FREE_TIER_PLAN);
-  budget.noteWorkerCpu(9);
-  assert.equal(lines.length, 1);
-  budget.noteWorkerCpu(10);
-  assert.equal(JSON.parse(lines[1]).signal, "limit_reached");
-  assert.equal(JSON.parse(lines[1]).limit, "worker_cpu_ms");
-});
-
-test("D1 adapter writes a fitting batch and drops one that would pass the cap", async () => {
+test("D1 adapter sends every statement and surfaces the daily write limit", async () => {
   const batches = [];
   const db = {
     prepare() {
@@ -83,6 +63,7 @@ test("D1 adapter writes a fitting batch and drops one that would pass the cap", 
     },
     async batch(statements) {
       batches.push(statements.length);
+      if (batches.length === 2) throw new Error(WRITE_LIMIT);
     },
   };
   const points = Array.from({ length: D1_BATCH_LIMIT }, (_, index) => ({
@@ -94,25 +75,57 @@ test("D1 adapter writes a fitting batch and drops one that would pass the cap", 
     units: "count",
     n: 1,
   }));
-  const batch = {
-    id: "id",
-    date: "2026-10-16",
-    receivedAt: "2026-10-16T00:00:00Z",
-    bytes: 1,
-    payload: "{}",
-    storeRaw: true,
-    points,
-    workouts: [],
-  };
-  const room = logsOf({ d1WritesPerDay: 100_000 });
-  await new D1Storage(db, { allowWrites: (count) => room.budget.allowD1Writes(count) }).insertIngest(batch);
+  await assert.rejects(
+    () => new D1Storage(db).insertIngest({
+      id: "id",
+      date: "2026-10-16",
+      receivedAt: "2026-10-16T00:00:00Z",
+      bytes: 1,
+      payload: "{}",
+      storeRaw: true,
+      points,
+      workouts: [],
+    }),
+    (error) => error?.code === "D1_DAILY_LIMIT" && error.limit === "d1_rows_written",
+  );
   assert.deepEqual(batches, [D1_BATCH_LIMIT, 1]);
-  const tight = logsOf({ d1WritesPerDay: 10 });
-  await new D1Storage(db, { allowWrites: (count) => tight.budget.allowD1Writes(count) }).insertIngest(batch);
-  assert.deepEqual(batches, [D1_BATCH_LIMIT, 1]);
-  assert.equal(JSON.parse(tight.lines[0]).signal, "limit_reached");
 });
 
-test("CPU sampling stays off outside the Workers runtime", () => {
-  assert.equal(onWorkersRuntime(), false);
+test("a D1 daily write limit becomes 429 with Retry-After and limit_hit", async () => {
+  const lines = [];
+  const realLog = console.log;
+  console.log = (line) => lines.push(String(line));
+  try {
+    const sample = fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8");
+    const response = await worker.fetch(new Request("http://example.test/ingest", {
+      method: "POST",
+      headers: { authorization: "Bearer tok", "content-type": "application/json" },
+      body: sample,
+    }), {
+      HEALTH_INGEST_TOKEN: "tok",
+      DB: {
+        prepare() {
+          return { bind() { return { sql: "x" }; } };
+        },
+        async batch() {
+          throw new Error(WRITE_LIMIT);
+        },
+        async all() {
+          return { results: [] };
+        },
+      },
+    });
+    assert.equal(response.status, 429);
+    const retry = Number(response.headers.get("retry-after"));
+    assert.equal(Number.isInteger(retry), true);
+    assert.ok(retry >= 1 && retry <= 86400);
+    const body = await response.json();
+    assert.equal(body.error, "daily_limit");
+    assert.equal(body.limit_hit, "d1_rows_written");
+    assert.equal(JSON.stringify(body).includes(WRITE_LIMIT), false);
+    assert.equal(JSON.parse(lines.at(-1)).limit_hit, "d1_rows_written");
+    assert.equal(JSON.parse(lines.at(-1)).plan, FREE_TIER_PLAN);
+  } finally {
+    console.log = realLog;
+  }
 });

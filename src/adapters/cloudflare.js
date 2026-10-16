@@ -1,11 +1,10 @@
 import { activeUrlToken } from "../core/auth.js";
-import { noteWorkerCpu, onWorkersRuntime } from "../core/free-tier.js";
+import { dailyLimitResponse } from "../core/free-tier.js";
 import { handleRequest } from "../core/http.js";
 import { D1Storage } from "./d1.js";
 
 export default {
   async fetch(request, env) {
-    const started = typeof performance !== "undefined" ? performance.now() : 0;
     try {
       return await handleRequest(request, {
         token: env?.HEALTH_INGEST_TOKEN,
@@ -18,8 +17,9 @@ export default {
         mcpAllowedOrigins: env?.MCP_ALLOWED_ORIGINS,
         storage: new D1Storage(env?.DB),
       });
-    } finally {
-      if (onWorkersRuntime()) noteWorkerCpu(performance.now() - started);
+    } catch (error) {
+      if (error?.code === "D1_DAILY_LIMIT") return dailyLimitResponse(error.limit);
+      throw error;
     }
   },
 };

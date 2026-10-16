@@ -77,6 +77,8 @@ Metrics outside the summary set are dropped unless listed in `HEALTH_METRIC_ALLO
 
 Limits and errors: a body over 20,000,000 characters returns `413` `{ "error": "payload_too_large" }`. Invalid JSON returns `400` `{ "error": "invalid_json" }`. A JSON value that is not a Health Auto Export object — `{}`, `[null]`, a null metric or sample, or a `metrics` / `workouts` value that is not an array — returns `400` `{ "error": "invalid_payload" }`. An object with an empty `metrics` or `workouts` array is valid. The Node server also stops reading at 20,000,000 bytes.
 
+On Cloudflare, the plan is: free tier; upgrade when a real limit is hit. This worker does not drop writes ahead of D1 and does not sample CPU. When D1 returns its documented daily row write or row read limit error, `POST /ingest` responds `429` `{ "error": "daily_limit", "limit_hit": "d1_rows_written" }` or `"d1_rows_read"`, with `Retry-After` set to the seconds until the next 00:00 UTC. The worker logs one JSON line, `limit_hit`. The log name for a measured approach to a cap is `limit_near`.
+
 Timestamps that include a numeric offset (`2026-10-14 17:30:00 -0700`) use the calendar date in that string. Timestamps without an offset are interpreted in `HEALTH_TIMEZONE` (default `UTC`).
 
 `/summary` adds `sum_qty` for summed metrics and reads `last_qty` for weight and body fat. Send each real quantity once inside a request (one daily total, or non-overlapping buckets). Health Auto Export should send whole days. A later request with fewer samples for that metric-day is ignored, so splitting one day across batch requests leaves the stored total at whichever request had the larger sample count.

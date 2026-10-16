@@ -1,3 +1,0 @@
-name = "pilot"
-EVIDENCE_KEY_NAMESPACE = "pilot"
-CONSENT_EVIDENCE_KEY_VERSION = "pilot-1"
