@@ -16,7 +16,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 
 ## How it works
 
-- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Health Auto Export or SyncFit on iPhone) posts your health data to your server.
+- **Your phone app sends your data.** An export app on your phone (HC Webhook or Life Dashboard Companion on Android, Apple Shortcuts on iPhone, built in with no extra app) posts your health data to your server.
 - **Your server keeps it.** health-mcp stores one row per metric per day in a database that you control.
 - **Your chatbot connects.** You add your server to your chatbot as an MCP connector. It can read your data, but never change it.
 
@@ -27,7 +27,7 @@ Not medical advice. See [Disclaimer](#disclaimer).
 > - A computer with a terminal
 > - [Node.js](https://nodejs.org) 22 or newer
 > - A free [Cloudflare](https://www.cloudflare.com) account
-> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Health Auto Export or SyncFit (iPhone)
+> - The phone app: HC Webhook or Life Dashboard Companion (Android), or Apple Shortcuts (iPhone, built in)
 > - A chatbot that supports MCP connectors
 > - About 15 minutes
 
@@ -120,22 +120,17 @@ Full setup for both apps: [Data sources](https://github.com/Airbloomer/health-mc
 </details>
 
 <details>
-<summary><strong>iPhone: Health Auto Export or SyncFit</strong></summary>
+<summary><strong>iPhone: Apple Shortcuts</strong></summary>
 
-**Health Auto Export:** in [Health Auto Export](https://help.healthyapps.dev/en/health-auto-export/automations/rest-api), open **Automations**, tap **New Automation**, choose **REST API**, and set:
+Shortcuts is built into iPhone, so there's no extra app to install. A shortcut reads your Health data and sends it to `https://<your-host>/ingest/shortcuts` with the header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token).
 
-- **URL:** `https://<your-host>/ingest`
-- **Header:** key `Authorization`, value `Bearer <HEALTH_INGEST_TOKEN>` (the word `Bearer`, a space, then the token)
-- **Export format:** JSON. **Export version:** Version 2
-- **Data type:** Health Metrics
+Full setup: [Shortcuts guide](https://github.com/Airbloomer/health-mcp/blob/main/docs/shortcuts.md)
 
-Create a second automation the same way, with data type **Workouts**. Tap **Manual Export** to send your first data. Automations only run while the phone is unlocked. Full details: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
-
-**SyncFit:** set it to post its native JSON (`schemaVersion` 1 with a `samples` array) to `https://<your-host>/ingest/syncfit`, with header key `Authorization` and value `Bearer <HEALTH_INGEST_TOKEN>`. Steps, energy, weight, body fat, nutrition and workouts are stored. Full details: [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#works-with).
+Prefer a dedicated app? See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 
 </details>
 
-✅ **Checkpoint:** run the same `curl` command from step 2 with yesterday's date (`YYYY-MM-DD`). You should now see numbers, such as `"steps"`, instead of empty values.
+✅ **Checkpoint:** after your first sync (on iPhone, run the shortcut once), run the same `curl` command from step 2 with yesterday's date (`YYYY-MM-DD`). You should now see numbers, such as `"steps"`, instead of empty values.
 
 ### 4. Connect your chatbot
 
@@ -188,7 +183,7 @@ Your data appears only after the phone app's first sync. The sleep question work
 - **Sending data fails right after deploying.** Run `npx wrangler d1 migrations apply health-mcp --remote`, then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. A later sync with fewer samples for a day does not replace a fuller one. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
-- **Nothing arrives from the iPhone.** Unlock the phone and tap **Manual Export**. Health Auto Export runs only while the phone is unlocked.
+- **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
 
 ## More documentation
 
