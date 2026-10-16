@@ -1,7 +1,7 @@
 # Copy to .dev.vars for `wrangler dev`. Do not commit .dev.vars.
 HEALTH_INGEST_TOKEN=replace-with-a-long-random-token
 # Optional. Worker secret in production (`wrangler secret put`), not a [vars] entry.
-# Unset disables URL-token auth. Do not reuse HEALTH_INGEST_TOKEN.
+# Must match ^[A-Za-z0-9_-]{32,}$. Unset, too short, or equal to HEALTH_INGEST_TOKEN disables URL auth.
 # HEALTH_INGEST_URL_TOKEN=
 HEALTH_TIMEZONE=UTC
 # Off by default. Set to true, 1, yes, or on to store each request body.

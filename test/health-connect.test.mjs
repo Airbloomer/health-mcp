@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { authed, redactRequestTarget } from "../src/core/auth.js";
+import { activeUrlToken, authed, redactRequestTarget, resetUrlTokenWarnings } from "../src/core/auth.js";
 import { exerciseName } from "../src/core/health-connect.js";
 import { parseHcWebhook } from "../src/core/hc-webhook.js";
 import { handleRequest } from "../src/core/http.js";
 import { parseLifeDashboard } from "../src/core/life-dashboard.js";
 import { MemoryStorage } from "../src/core/memory.js";
 import { summaryDate } from "./expected.mjs";
+
+const URL_SECRET = `${"a".repeat(31)}-`;
 
 function request(pathname, { method = "POST", token = "tok", body, headers = {} } = {}) {
   const initHeaders = new Headers(headers);
@@ -225,38 +227,38 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   assert.equal(disabledQuery.status, 401);
   const disabledPath = await handleRequest(request("/ingest/life-dashboard/tok", { token: "", body: JSON.stringify(lifeBody({ steps: 9, rawSteps: [] })) }), off);
   assert.equal(disabledPath.status, 401);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_TOKEN: "tok" }), false);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), ""), false);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_TOKEN: "", HEALTH_INGEST_URL_TOKEN: "" }), false);
-  assert.equal(authed(new Request("http://localhost/ingest/hc-webhook?token=url-secret", { method: "POST" }), { HEALTH_INGEST_URL_TOKEN: "   " }), false);
+  assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), { HEALTH_INGEST_TOKEN: "tok" }), false);
+  assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), ""), false);
+  assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), { HEALTH_INGEST_TOKEN: "", HEALTH_INGEST_URL_TOKEN: "" }), false);
+  assert.equal(authed(new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, { method: "POST" }), { HEALTH_INGEST_URL_TOKEN: "   " }), false);
 
-  const environment = ctx(storage, { urlToken: "url-secret" });
+  const environment = ctx(storage, { urlToken: `${URL_SECRET}` });
   const mainAsUrl = await handleRequest(request("/ingest/hc-webhook?token=tok", { token: "", body: JSON.stringify(hcBody([9])) }), environment);
   assert.equal(mainAsUrl.status, 401);
   const wrongQuery = await handleRequest(request("/ingest/hc-webhook?token=nope", { token: "", body: "{}" }), environment);
   assert.equal(wrongQuery.status, 401);
-  const basic = new Request("http://localhost/ingest/hc-webhook?token=url-secret", {
+  const basic = new Request(`http://localhost/ingest/hc-webhook?token=${URL_SECRET}`, {
     method: "POST",
-    headers: { authorization: "Basic url-secret", "content-type": "application/json" },
+    headers: { authorization: `Basic ${URL_SECRET}`, "content-type": "application/json" },
     body: "{}",
   });
   assert.equal((await handleRequest(basic, environment)).status, 401);
-  const urlAsBearer = await handleRequest(request("/ingest/hc-webhook", { token: "url-secret", body: JSON.stringify(hcBody([9])) }), environment);
+  const urlAsBearer = await handleRequest(request("/ingest/hc-webhook", { token: `${URL_SECRET}`, body: JSON.stringify(hcBody([9])) }), environment);
   assert.equal(urlAsBearer.status, 401);
 
-  const query = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { token: "", body: JSON.stringify(hcBody([9])) }), environment);
+  const query = await handleRequest(request(`/ingest/hc-webhook?token=${URL_SECRET}`, { token: "", body: JSON.stringify(hcBody([9])) }), environment);
   assert.equal(query.status, 200);
   assert.equal((await storage.queryDaySummary(summaryDate)).steps, 9);
-  const path = await handleRequest(request("/ingest/hc-webhook/url-secret", { token: "", body: JSON.stringify(hcBody([9, 1])) }), environment);
+  const path = await handleRequest(request(`/ingest/hc-webhook/${URL_SECRET}`, { token: "", body: JSON.stringify(hcBody([9, 1])) }), environment);
   assert.equal(path.status, 200);
   assert.equal((await storage.queryDaySummary(summaryDate)).steps, 10);
-  const life = await handleRequest(request("/ingest/life-dashboard/url-secret", { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: "url-secret" }));
+  const life = await handleRequest(request(`/ingest/life-dashboard/${URL_SECRET}`, { token: "", body: JSON.stringify(lifeBody({ steps: 11, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: `${URL_SECRET}` }));
   assert.equal(life.status, 200);
 
-  const wrongBearer = await handleRequest(request("/ingest/hc-webhook?token=url-secret", { token: "nope", body: "{}" }), environment);
+  const wrongBearer = await handleRequest(request(`/ingest/hc-webhook?token=${URL_SECRET}`, { token: "nope", body: "{}" }), environment);
   assert.equal(wrongBearer.status, 401);
-  const encoded = await handleRequest(request("/ingest/life-dashboard?%74oken=url-secret", { token: "", body: JSON.stringify(lifeBody({ steps: 4, rawSteps: [] })) }), ctx(new MemoryStorage(), { urlToken: "url-secret" }));
-  assert.equal(encoded.status, 200);
+  const encodedKey = await handleRequest(request(`/ingest/life-dashboard?%74oken=${URL_SECRET}`, { token: "", body: "{}" }), environment);
+  assert.equal(encodedKey.status, 401);
   assert.equal(redactRequestTarget("POST /ingest/hc-webhook?%74oken=s3cret-value failed", "s3cret-value").includes("s3cret-value"), false);
   assert.equal(
     redactRequestTarget("POST /ingest/hc-webhook?%74oken=s3cret-value failed", "s3cret-value"),
@@ -265,43 +267,94 @@ test("URL ingest token is write-only, limited to two POST routes, and off by def
   assert.equal(redactRequestTarget("POST /ingest/hc-webhook?%2574oken=s3cret-value", "s3cret-value").includes("s3cret-value"), false);
 
   const denied = [
-    ["GET", `/summary?date=${summaryDate}&token=url-secret`],
-    ["POST", `/summary?date=${summaryDate}&token=url-secret`],
+    ["GET", `/summary?date=${summaryDate}&token=${URL_SECRET}`],
+    ["POST", `/summary?date=${summaryDate}&token=${URL_SECRET}`],
     ["GET", `/summary?date=${summaryDate}&token=tok`],
-    ["GET", "/mcp?token=url-secret"],
-    ["POST", "/mcp?token=url-secret"],
-    ["DELETE", "/mcp?token=url-secret"],
-    ["GET", "/ingest?token=url-secret"],
-    ["POST", "/ingest?token=url-secret"],
-    ["PUT", "/ingest?token=url-secret"],
-    ["POST", "/ingest/health-export-pro?token=url-secret"],
-    ["GET", "/ingest/syncfit?token=url-secret"],
-    ["POST", "/ingest/syncfit?token=url-secret"],
-    ["POST", "/ingest/syncfit/url-secret"],
-    ["POST", "/import/apple-health?token=url-secret"],
-    ["POST", "/import/apple-health/chunk?token=url-secret"],
-    ["GET", "/ingest/hc-webhook?token=url-secret"],
-    ["PUT", "/ingest/hc-webhook?token=url-secret"],
-    ["DELETE", "/ingest/hc-webhook?token=url-secret"],
-    ["GET", "/ingest/hc-webhook/url-secret"],
-    ["GET", "/ingest/life-dashboard?token=url-secret"],
-    ["PUT", "/ingest/life-dashboard/url-secret"],
-    ["DELETE", "/ingest/life-dashboard?token=url-secret"],
-    ["POST", "/ingest/life-dashboard/url-secret/extra"],
+    ["GET", `/mcp?token=${URL_SECRET}`],
+    ["POST", `/mcp?token=${URL_SECRET}`],
+    ["DELETE", `/mcp?token=${URL_SECRET}`],
+    ["GET", `/ingest?token=${URL_SECRET}`],
+    ["POST", `/ingest?token=${URL_SECRET}`],
+    ["PUT", `/ingest?token=${URL_SECRET}`],
+    ["POST", `/ingest/health-export-pro?token=${URL_SECRET}`],
+    ["GET", `/ingest/syncfit?token=${URL_SECRET}`],
+    ["POST", `/ingest/syncfit?token=${URL_SECRET}`],
+    ["POST", `/ingest/syncfit/${URL_SECRET}`],
+    ["POST", `/import/apple-health?token=${URL_SECRET}`],
+    ["POST", `/import/apple-health/chunk?token=${URL_SECRET}`],
+    ["GET", `/ingest/hc-webhook?token=${URL_SECRET}`],
+    ["PUT", `/ingest/hc-webhook?token=${URL_SECRET}`],
+    ["DELETE", `/ingest/hc-webhook?token=${URL_SECRET}`],
+    ["GET", `/ingest/hc-webhook/${URL_SECRET}`],
+    ["GET", `/ingest/life-dashboard?token=${URL_SECRET}`],
+    ["PUT", `/ingest/life-dashboard/${URL_SECRET}`],
+    ["DELETE", `/ingest/life-dashboard?token=${URL_SECRET}`],
+    ["POST", `/ingest/life-dashboard/${URL_SECRET}/extra`],
   ];
   for (const [method, pathname] of denied) {
     const body = method === "GET" || method === "DELETE" ? undefined : "{}";
     const response = await handleRequest(request(pathname, { method, token: "", body }), environment);
     assert.equal(response.status, 401, `${method} ${pathname}`);
   }
-  const summaryBearer = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET", token: "url-secret" }), environment);
+  const summaryBearer = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET", token: `${URL_SECRET}` }), environment);
   assert.equal(summaryBearer.status, 401);
-  const mcpBearer = await handleRequest(request("/mcp", { method: "POST", token: "url-secret", body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
+  const mcpBearer = await handleRequest(request("/mcp", { method: "POST", token: `${URL_SECRET}`, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }), environment);
   assert.equal(mcpBearer.status, 401);
 
   const summary = await handleRequest(request(`/summary?date=${summaryDate}`, { method: "GET" }), environment);
   assert.equal(summary.status, 200);
   assert.equal((await summary.json()).steps, 10);
+});
+
+test("encoded, padded, short, and reused URL tokens are rejected", async () => {
+  const environment = ctx(new MemoryStorage(), { urlToken: URL_SECRET });
+  const encodedPath = [...URL_SECRET].map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`).join("");
+  const hyphenEncoded = URL_SECRET.replace("-", "%2D");
+  const rejected = [
+    `/ingest/hc-webhook/${encodedPath}`,
+    `/ingest/life-dashboard/${encodedPath}`,
+    `/ingest/hc-webhook/${hyphenEncoded}`,
+    `/ingest/hc-webhook/${URL_SECRET}%20`,
+    `/ingest/life-dashboard/${URL_SECRET}%20`,
+    `/ingest/hc-webhook?token=${encodedPath}`,
+    `/ingest/hc-webhook?token=${URL_SECRET}%20`,
+    `/ingest/hc-webhook?token=%20${URL_SECRET}`,
+    `/ingest/hc-webhook?%74oken=${URL_SECRET}`,
+    `/ingest/life-dashboard?%74oken=${URL_SECRET}`,
+  ];
+  for (const pathname of rejected) {
+    const response = await handleRequest(request(pathname, { token: "", body: "{}" }), environment);
+    assert.equal(response.status, 401, pathname);
+  }
+
+  const logs = [];
+  const original = console.error;
+  console.error = (message) => logs.push(String(message));
+  try {
+    resetUrlTokenWarnings();
+    const short = ctx(new MemoryStorage(), { urlToken: "url-secret" });
+    assert.equal((await handleRequest(request("/ingest/hc-webhook/url-secret", { token: "", body: "{}" }), short)).status, 401);
+    assert.equal((await handleRequest(request(`/ingest/hc-webhook/${URL_SECRET}`, { token: "", body: "{}" }), short)).status, 401);
+    assert.equal((await handleRequest(request("/ingest/hc-webhook?token=url-secret", { token: "", body: "{}" }), short)).status, 401);
+    assert.equal(logs.join("\n").includes("url-secret"), false);
+    assert.ok(logs.some((line) => line.includes("must match ^[A-Za-z0-9_-]{32,}$")));
+
+    resetUrlTokenWarnings();
+    logs.length = 0;
+    assert.equal(activeUrlToken("", "tok"), "");
+    assert.equal(logs.length, 0);
+
+    const reused = await handleRequest(request(`/ingest/hc-webhook/${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { token: URL_SECRET, urlToken: URL_SECRET }));
+    assert.equal(reused.status, 401);
+    const paddedBearer = await handleRequest(request(`/ingest/life-dashboard?token=${URL_SECRET}`, { token: "", body: "{}" }), ctx(new MemoryStorage(), { token: `  ${URL_SECRET}  `, urlToken: URL_SECRET }));
+    assert.equal(paddedBearer.status, 401);
+    const warning = logs.join("\n");
+    assert.match(warning, /HEALTH_INGEST_URL_TOKEN matches HEALTH_INGEST_TOKEN/);
+    assert.equal(warning.includes(URL_SECRET), false);
+  } finally {
+    console.error = original;
+    resetUrlTokenWarnings();
+  }
 });
 
 test("Life Dashboard uses daily totals and a same-size resend replaces the running total", async () => {
