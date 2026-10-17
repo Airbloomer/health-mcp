@@ -17,6 +17,7 @@ import {
   READ_BACKFILL,
   READ_HINT,
   RESERVE_BACKFILL,
+  SEAL_BACKFILL_IF_MISSING,
   toPostgres,
   UPSERT_HINT,
   WORKOUTS_FOR_DATE,
@@ -197,6 +198,10 @@ export function createPostgresStorageFromPool(pool) {
       } finally {
         held.release();
       }
+    },
+    async sealIngestBackfillIfMissing({ openedAt, closedAt, deadline, totalBytes = 0 }) {
+      await pool.query(toPostgres(SEAL_BACKFILL_IF_MISSING), [openedAt, closedAt, 0, 0, deadline || closedAt, totalBytes]);
+      return this.readIngestBackfill();
     },
     async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
       const result = await pool.query(toPostgres(FINISH_BACKFILL), [

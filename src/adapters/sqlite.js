@@ -9,7 +9,7 @@ import { migrationFiles, statementsForSqlite } from "./migrate.js";
 import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_ON_DATES,
   UPSERT_POINTS_JSON, REPLACE_POINTS_JSON, UPSERT_WORKOUTS_JSON, INSERT_WORKOUTS_JSON,
   WORKOUTS_FOR_DATE, WORKOUTS_ON_DATES, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
-  READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, HAS_STORED_DATA } from "./statements.js";
+  READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, SEAL_BACKFILL_IF_MISSING, HAS_STORED_DATA } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -48,6 +48,7 @@ export function createSqliteStorage(filename) {
   const readBackfill = db.prepare(READ_BACKFILL);
   const reserveBackfill = db.prepare(RESERVE_BACKFILL);
   const finishBackfill = db.prepare(FINISH_BACKFILL);
+  const sealBackfill = db.prepare(SEAL_BACKFILL_IF_MISSING);
   const closeBackfill = db.prepare(CLOSE_BACKFILL);
   const hasStored = db.prepare(HAS_STORED_DATA);
   const pointsOnDates = db.prepare(POINTS_ON_DATES);
@@ -125,6 +126,10 @@ export function createSqliteStorage(filename) {
         throw error;
       }
       return reserved;
+    },
+    async sealIngestBackfillIfMissing({ openedAt, closedAt, deadline, totalBytes = 0 }) {
+      sealBackfill.run(openedAt, closedAt, 0, 0, deadline || closedAt, totalBytes);
+      return this.readIngestBackfill();
     },
     async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
       const row = finishBackfill.get(openedAt, closedAt, addBytes, addDays, deadline || closedAt, totalBytes);

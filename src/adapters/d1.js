@@ -21,6 +21,7 @@ import {
   RELEASE_BACKFILL,
   REPLACE_POINTS_JSON,
   RESERVE_BACKFILL,
+  SEAL_BACKFILL_IF_MISSING,
   CLAIM_QUOTA,
   UPSERT_HINT,
   UPSERT_POINTS_JSON,
@@ -118,6 +119,12 @@ export class D1Storage {
       throw error;
     }
     return reserved;
+  }
+
+  async sealIngestBackfillIfMissing({ openedAt, closedAt, deadline, totalBytes = 0 }) {
+    const statement = this.db.prepare(SEAL_BACKFILL_IF_MISSING).bind(openedAt, closedAt, 0, 0, deadline || closedAt, totalBytes);
+    await this.run(() => this.db.batch([statement]));
+    return this.readIngestBackfill();
   }
 
   async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {

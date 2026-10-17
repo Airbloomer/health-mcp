@@ -163,11 +163,11 @@ export async function syncIngestBackfill(ctx) {
   // database as a fresh import.
   if (!row && await ctx.storage.hasStoredData()) {
     const closedAt = now.toISOString();
-    row = await ctx.storage.finishIngestBackfill({
+    // Insert only. A window row that landed between the read and this
+    // statement stays as it is, so a just-opened window is not closed.
+    row = await ctx.storage.sealIngestBackfillIfMissing({
       openedAt: closedAt,
       closedAt,
-      addBytes: 0,
-      addDays: 0,
       deadline: closedAt,
       totalBytes: 0,
     });

@@ -122,6 +122,22 @@ export class MemoryStorage {
     });
   }
 
+  async sealIngestBackfillIfMissing({ openedAt, closedAt, deadline, totalBytes = 0 }) {
+    return this.withBackfillLock(async () => {
+      if (!this.backfill) {
+        this.backfill = {
+          opened_at: openedAt,
+          closed_at: closedAt,
+          bytes: 0,
+          days: 0,
+          deadline: deadline || closedAt,
+          total_bytes: totalBytes,
+        };
+      }
+      return { ...this.backfill };
+    });
+  }
+
   async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
     return this.withBackfillLock(async () => {
       if (!this.backfill) {
