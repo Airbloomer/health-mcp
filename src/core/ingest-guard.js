@@ -4,6 +4,9 @@ import { MAX_PAYLOAD_CHARS } from "./metrics.js";
 /** Today and yesterday in the configured timezone. */
 export const DEFAULT_INGEST_MAX_AGE_DAYS = 1;
 
+/** About 100 years. Larger values make the calendar cutoff invalid. */
+export const MAX_INGEST_MAX_AGE_DAYS = 36500;
+
 /** JSON ingest bodies larger than this are rejected. Apple Health import is separate. */
 export const DEFAULT_INGEST_MAX_BODY_BYTES = 1_000_000;
 
@@ -17,7 +20,7 @@ export const STALE_HINT_AT = 50;
 export const FUTURE_SKEW_DAYS = 1;
 
 export const EXPORT_HINT =
-  "This export looks misconfigured: it sent a full history or it is posting too often. Follow Recommended export settings in the README (JSON version 2, one total per day, today and yesterday, a few times a day).";
+  "This export looks misconfigured: it sent too much history or it is posting too often. Follow Recommended export settings in the README.";
 
 function configuredInteger(value) {
   if (typeof value === "number" && Number.isInteger(value)) return value;
@@ -30,7 +33,7 @@ function configuredInteger(value) {
 export function resolveMaxAgeDays(value) {
   const parsed = configuredInteger(value);
   if (parsed == null || parsed < 0) return DEFAULT_INGEST_MAX_AGE_DAYS;
-  return parsed;
+  return Math.min(parsed, MAX_INGEST_MAX_AGE_DAYS);
 }
 
 export function resolveMaxBodyBytes(value) {
@@ -83,10 +86,17 @@ export function rateLimitedBody(limit) {
  * `FUTURE_SKEW_DAYS`. `dropped_stale` and `dropped_future` count dated samples
  * and workouts left out on each side.
  */
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || "");
+}
+
 export function filterRecent(points, workouts, { now, timeZone, maxAgeDays }) {
   const today = localDate(now.toISOString(), timeZone);
   const cutoff = shiftIsoDate(today, -maxAgeDays);
   const future = shiftIsoDate(today, FUTURE_SKEW_DAYS);
+  if (!isIsoDate(cutoff) || !isIsoDate(future)) {
+    return { points: points || [], workouts: workouts || [], dropped_stale: 0, dropped_future: 0, cutoff, today };
+  }
   const keptPoints = [];
   const keptWorkouts = [];
   let droppedStale = 0;

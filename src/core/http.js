@@ -68,27 +68,22 @@ function rateKey(req) {
 }
 
 /**
- * Read the current hour's counter. Over the limit, answer 429 and do not
+ * One upsert increments the hour and returns the new count, and only while the
+ * stored count is still under the limit. Over the limit, answer 429 and do not
  * increment. The hint row is written only when its text changes, so a run of
- * rejected posts writes at most once. An accepted post records the hit later,
- * as one statement beside the data writes.
- *
- * The read and the increment are separate, so two overlapping posts can both
- * pass the read and land one past the limit. That small overshoot is accepted.
- * Old hour rows are not deleted here, so the accepted post stays one extra write.
+ * rejected posts writes at most once. An accepted post is that one counter write.
+ * Old hour rows are not deleted here.
  */
 async function claimQuota(req, ctx) {
   const limit = resolveRatePerHour(ctx.ingestRatePerHour);
-  if (limit === 0) return { ticket: null };
+  if (limit === 0) return null;
   const now = requestNow(ctx);
-  const tokenKey = rateKey(req);
-  const windowStart = hourWindowStart(now);
-  const hits = await ctx.storage.readIngestQuota(tokenKey, windowStart);
-  if (hits >= limit) {
+  const hits = await ctx.storage.claimIngestQuota(rateKey(req), hourWindowStart(now), limit);
+  if (hits == null) {
     await ctx.storage.setExportHint(EXPORT_HINT);
-    return { response: rateLimited(limit, now) };
+    return rateLimited(limit, now);
   }
-  return { ticket: { tokenKey, windowStart } };
+  return null;
 }
 
 function jsonByteLimit(ctx) {
@@ -276,7 +271,7 @@ export async function handleRequest(req, ctx) {
   return json({ error: "not_found" }, 404);
 }
 
-async function storeIngest(ctx, { points, workouts, samples, bytes, payload, extra, quota, hint }) {
+async function storeIngest(ctx, { points, workouts, samples, bytes, payload, extra, hint }) {
   const timeZone = resolveTimeZone(ctx.timeZone);
   const now = requestNow(ctx);
   const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])].sort();
@@ -293,7 +288,7 @@ async function storeIngest(ctx, { points, workouts, samples, bytes, payload, ext
     storeRaw,
     points,
     workouts,
-  }, { quota, hint });
+  }, { hint });
   return json({
     ok: true,
     id,
@@ -331,7 +326,7 @@ async function* limitBytes(stream, limit) {
   }
 }
 
-async function acceptAppleExport(source, ctx, quota = null) {
+async function acceptAppleExport(source, ctx, hint) {
   try {
     const parsed = await parseAppleExport(source, {
       timeZone: resolveTimeZone(ctx.timeZone),
@@ -344,7 +339,7 @@ async function acceptAppleExport(source, ctx, quota = null) {
       samples: parsed.samples,
       bytes: parsed.bytes,
       payload: null,
-      quota,
+      hint,
     });
   } catch (error) {
     if (error?.code === "PAYLOAD_TOO_LARGE") return json({ error: "payload_too_large" }, 413);
@@ -362,14 +357,14 @@ async function ingest(req, ctx) {
     bytes = await readIngestBytes(req, limit);
   } catch (error) {
     if (error?.code === "PAYLOAD_TOO_LARGE") {
-      return error.apple ? json({ error: "payload_too_large" }, 413) : tooLarge(limit);
+      return error.apple ? json(payloadTooLargeBody(MAX_PAYLOAD_CHARS), 413) : tooLarge(limit);
     }
     throw error;
   }
   if (looksLikeAppleExport(bytes)) {
-    const quota = await claimQuota(req, ctx);
-    if (quota.response) return quota.response;
-    return acceptAppleExport(bytes, ctx, quota.ticket);
+    const limited = await claimQuota(req, ctx);
+    if (limited) return limited;
+    return acceptAppleExport(bytes, ctx, null);
   }
   const text = new TextDecoder().decode(bytes);
   let body;
@@ -472,8 +467,8 @@ async function ingestShortcuts(req, ctx) {
   // URL-token workouts are insert-only and never change an existing workout.
   const bearer = Boolean(req.headers.get("authorization"));
   const points = bearer ? rows : rows.map(({ replace, ...row }) => ({ ...row, n: 0 }));
-  const quota = await claimQuota(req, ctx);
-  if (quota.response) return quota.response;
+  const limited = await claimQuota(req, ctx);
+  if (limited) return limited;
   return storeIngest(ctx, {
     points,
     workouts: bearer ? parsed.workouts : parsed.workouts.map((workout) => ({ ...workout, insertOnly: true })),
@@ -481,7 +476,7 @@ async function ingestShortcuts(req, ctx) {
     bytes: text.length,
     payload: text,
     extra: { dropped: parsed.points.length - kept.length },
-    quota: quota.ticket,
+    hint: null,
   });
 }
 
@@ -489,7 +484,7 @@ async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
   let points = parsed.points;
   let workouts = parsed.workouts;
   let extra;
-  let hint;
+  let hint = null;
   if (recency) {
     const filtered = filterRecent(points, workouts, {
       now: requestNow(ctx),
@@ -499,10 +494,10 @@ async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
     points = filtered.points;
     workouts = filtered.workouts;
     extra = { dropped_stale: filtered.dropped_stale, dropped_future: filtered.dropped_future };
-    hint = filtered.dropped_stale >= STALE_HINT_AT ? EXPORT_HINT : null;
+    if (filtered.dropped_stale >= STALE_HINT_AT) hint = EXPORT_HINT;
   }
-  const quota = await claimQuota(req, ctx);
-  if (quota.response) return quota.response;
+  const limited = await claimQuota(req, ctx);
+  if (limited) return limited;
   const allow = storedMetricSet(ctx.metricAllowlist);
   const kept = points.filter((point) => allow.has(point.metric));
   return storeIngest(ctx, {
@@ -512,7 +507,6 @@ async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
     bytes: text.length,
     payload: text,
     extra,
-    quota: quota.ticket,
     hint,
   });
 }

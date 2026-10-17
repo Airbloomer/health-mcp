@@ -10,11 +10,10 @@ import {
   METRIC_RANGE,
   POINTS_FOR_DATE,
   READ_HINT,
-  READ_QUOTA,
+  CLAIM_QUOTA,
   REPLACE_POINT,
   UPSERT_HINT,
   UPSERT_POINT,
-  UPSERT_QUOTA,
   INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
@@ -61,9 +60,11 @@ export class D1Storage {
     return { points, workouts };
   }
 
-  async readIngestQuota(tokenKey, windowStart) {
-    const rows = await this.rowsFor(READ_QUOTA, tokenKey, windowStart);
-    return Number(rows[0]?.hits ?? 0);
+  async claimIngestQuota(tokenKey, windowStart, limit) {
+    const statement = this.db.prepare(CLAIM_QUOTA).bind(tokenKey, windowStart, limit);
+    const results = await this.run(() => this.db.batch([statement]));
+    const hits = results?.[0]?.results?.[0]?.hits;
+    return hits == null ? null : Number(hits);
   }
 
   async readExportHint() {
@@ -103,9 +104,6 @@ export class D1Storage {
       statements.push(
         this.db.prepare(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
       );
-    }
-    if (options.quota) {
-      statements.push(this.db.prepare(UPSERT_QUOTA).bind(options.quota.tokenKey, options.quota.windowStart));
     }
     const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
     if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());

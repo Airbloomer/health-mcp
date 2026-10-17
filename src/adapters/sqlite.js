@@ -7,7 +7,7 @@ import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
 import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT,
   REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE,
-  READ_QUOTA, UPSERT_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT } from "./statements.js";
+  CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -43,8 +43,7 @@ export function createSqliteStorage(filename) {
   const metricRange = db.prepare(METRIC_RANGE);
   const metricsStmt = db.prepare(LIST_METRICS);
   const workoutsRange = db.prepare(WORKOUTS_RANGE);
-  const readQuota = db.prepare(READ_QUOTA);
-  const upsertQuota = db.prepare(UPSERT_QUOTA);
+  const claimQuota = db.prepare(CLAIM_QUOTA);
   const readHint = db.prepare(READ_HINT);
   const upsertHint = db.prepare(UPSERT_HINT);
   const deleteHint = db.prepare(DELETE_HINT);
@@ -65,7 +64,6 @@ export function createSqliteStorage(filename) {
     for (const workout of diff.workouts) {
       (workout.insertOnly ? insertWorkout : upsertWorkout).run(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal);
     }
-    if (options.quota) upsertQuota.run(options.quota.tokenKey, options.quota.windowStart);
     const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
     if (action === "clear") deleteHint.run();
     if (action === "set") upsertHint.run(options.hint);
@@ -73,8 +71,9 @@ export function createSqliteStorage(filename) {
   });
 
   return {
-    async readIngestQuota(tokenKey, windowStart) {
-      return Number(readQuota.get(tokenKey, windowStart)?.hits ?? 0);
+    async claimIngestQuota(tokenKey, windowStart, limit) {
+      const row = claimQuota.get(tokenKey, windowStart, limit);
+      return row?.hits == null ? null : Number(row.hits);
     },
     async readExportHint() {
       return readHint.get()?.hint ?? null;

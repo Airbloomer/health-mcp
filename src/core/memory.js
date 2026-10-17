@@ -26,8 +26,13 @@ export class MemoryStorage {
     this.exportHint = null;
   }
 
-  async readIngestQuota(tokenKey, windowStart) {
-    return this.quota.get(`${tokenKey}\0${windowStart}`) ?? 0;
+  async claimIngestQuota(tokenKey, windowStart, limit) {
+    const key = `${tokenKey}\0${windowStart}`;
+    const hits = this.quota.get(key) ?? 0;
+    if (hits >= limit) return null;
+    const next = hits + 1;
+    this.quota.set(key, next);
+    return next;
   }
 
   async readExportHint() {
@@ -62,10 +67,6 @@ export class MemoryStorage {
     for (const workout of diff.workouts) {
       const { insertOnly, ...stored } = workout;
       this.workouts.set(`${workout.name}\0${workout.start}`, stored);
-    }
-    if (options.quota) {
-      const key = `${options.quota.tokenKey}\0${options.quota.windowStart}`;
-      this.quota.set(key, (this.quota.get(key) ?? 0) + 1);
     }
     const action = hintAction(this.exportHint, options.hint);
     if (action === "clear") this.exportHint = null;
