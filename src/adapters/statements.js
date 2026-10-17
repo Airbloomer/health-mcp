@@ -146,6 +146,15 @@ export const RELEASE_BACKFILL =
 export const DELETE_EMPTY_BACKFILL =
   "DELETE FROM ingest_backfill WHERE id = 1 AND bytes = 0 AND days = 0 AND closed_at IS NULL";
 
+/**
+ * Create a closed window when stored rows exist and no row does.
+ * A row that appeared in the meantime is left as it is, including an open one.
+ */
+export const SEAL_BACKFILL_IF_MISSING =
+  "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) " +
+  "VALUES (1, ?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO NOTHING";
+
 /** Close the window, creating a closed row when none exists. Already closed is unchanged. */
 export const FINISH_BACKFILL =
   "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) " +
