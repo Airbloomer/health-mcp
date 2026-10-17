@@ -2,14 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
-import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { dateSpan, jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
 import { migrationFiles } from "./migrate.js";
-import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_BETWEEN,
+import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_ON_DATES,
   UPSERT_POINTS_JSON, REPLACE_POINTS_JSON, UPSERT_WORKOUTS_JSON, INSERT_WORKOUTS_JSON,
-  WORKOUTS_FOR_DATE, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
-  READ_BACKFILL, RESERVE_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, HAS_STORED_DATA } from "./statements.js";
+  WORKOUTS_FOR_DATE, WORKOUTS_ON_DATES, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
+  READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, HAS_STORED_DATA } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -50,15 +50,23 @@ export function createSqliteStorage(filename) {
   const finishBackfill = db.prepare(FINISH_BACKFILL);
   const closeBackfill = db.prepare(CLOSE_BACKFILL);
   const hasStored = db.prepare(HAS_STORED_DATA);
-  const pointsBetween = db.prepare(POINTS_BETWEEN);
+  const pointsOnDates = db.prepare(POINTS_ON_DATES);
+  const workoutsOnDates = db.prepare(WORKOUTS_ON_DATES);
+  const releaseBackfill = db.prepare(RELEASE_BACKFILL);
+  const deleteEmptyBackfill = db.prepare(DELETE_EMPTY_BACKFILL);
   const upsertPointsJson = db.prepare(UPSERT_POINTS_JSON);
   const replacePointsJson = db.prepare(REPLACE_POINTS_JSON);
   const upsertWorkoutsJson = db.prepare(UPSERT_WORKOUTS_JSON);
   const insertWorkoutsJson = db.prepare(INSERT_WORKOUTS_JSON);
   const loadSpan = (dates) => {
-    const span = dateSpan(dates);
-    if (!span) return { points: [], workouts: [] };
-    return { points: pointsBetween.all(span[0], span[1]), workouts: workoutsRange.all(span[0], span[1]) };
+    const points = [];
+    const workouts = [];
+    for (const group of dateGroups(dates, MAX_INGEST_DATES)) {
+      const json = JSON.stringify(group);
+      points.push(...pointsOnDates.all(json));
+      workouts.push(...workoutsOnDates.all(json));
+    }
+    return { points, workouts };
   };
   const insertAll = db.transaction((batch, options = {}) => {
     const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
@@ -107,7 +115,13 @@ export function createSqliteStorage(filename) {
       );
       const reserved = normalizeBackfill(row);
       if (!reserved) return null;
-      if (args.write) await args.write();
+      try {
+        if (args.write) await args.write();
+      } catch (error) {
+        releaseBackfill.run(args.addBytes, addDays, addDays, reserved.closed_at, args.addBytes);
+        deleteEmptyBackfill.run();
+        throw error;
+      }
       return reserved;
     },
     async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {

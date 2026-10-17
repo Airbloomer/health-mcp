@@ -4,8 +4,9 @@ import { authed } from "./auth.js";
 import { hcWebhookError, isHcWebhook, parseHcWebhook } from "./hc-webhook.js";
 import { healthExportProError, parseHealthExportPro } from "./health-export-pro.js";
 import {
-  EXPORT_HINT,
   MAX_INGEST_DATES,
+  dateGroups,
+  exportHint,
   activeIngestLimits,
   backfillClosesAt,
   backfillStatus,
@@ -27,7 +28,7 @@ import {
 import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-dashboard.js";
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
 import { DEFAULT_TIME_ZONE, MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "./metrics.js";
-import { localDate, parse, payloadError } from "./parse.js";
+import { parse, payloadError } from "./parse.js";
 import { parseShortcuts, shortcutDays, shortcutsError, shortcutsSourcePriority } from "./shortcuts.js";
 import { parseSyncFit, syncFitError } from "./syncfit.js";
 
@@ -80,11 +81,12 @@ function tooLarge(state) {
   return respond(payloadTooLargeBody(state.byteLimit, {
     closed: !relaxed,
     duringBackfill: relaxed,
+    maxBytes: state.limits.maxBytes,
   }), 413, clientView(state));
 }
 
-function overTotal(view) {
-  return respond(backfillTotalBody(), 413, view);
+function overTotal(view, maxBytes) {
+  return respond(backfillTotalBody(maxBytes), 413, view);
 }
 
 function rateLimited(limit, now, view) {
@@ -125,18 +127,18 @@ async function claimQuota(req, ctx, state) {
   if (limit === 0) return null;
   const hits = await ctx.storage.claimIngestQuota(rateKey(req), hourWindowStart(state.now), limit);
   if (hits == null) {
-    await ctx.storage.setExportHint(EXPORT_HINT);
+    await ctx.storage.setExportHint(exportHint(state.limits?.maxBytes));
     return rateLimited(limit, state.now, clientView(state));
   }
   return null;
 }
 
 function clientView(state) {
-  if (!state?.view) return null;
+  if (!state?.row) return state ? { open: false, closes_at: null, bytes_remaining: 0 } : null;
   return {
-    open: Boolean(state.view.open),
-    closes_at: state.view.closes_at ?? null,
-    bytes_remaining: state.view.bytes_remaining ?? 0,
+    open: Boolean(state.view?.open),
+    closes_at: state.view?.closes_at ?? null,
+    bytes_remaining: state.view?.bytes_remaining ?? 0,
   };
 }
 
@@ -151,17 +153,6 @@ function utf8ByteLength(text) {
 export async function syncIngestBackfill(ctx) {
   const now = requestNow(ctx);
   let row = await ctx.storage.readIngestBackfill();
-  if (!row && await ctx.storage.hasStoredData()) {
-    const closedAt = now.toISOString();
-    row = await ctx.storage.finishIngestBackfill({
-      openedAt: closedAt,
-      closedAt,
-      addBytes: 0,
-      addDays: 0,
-      deadline: closedAt,
-      totalBytes: 0,
-    });
-  }
   const preview = activeIngestLimits(row, ctx, now);
   if (row && row.closed_at == null && !preview.view.open) {
     const deadline = Date.parse(preview.view.closes_at);
@@ -332,7 +323,7 @@ async function readJsonText(req, state) {
   try {
     const bytes = await readCapped(req, state.byteLimit);
     if ((state.view.open || state.pending) && bytes.byteLength > state.admitRemaining) {
-      return { response: overTotal(clientView(state)) };
+      return { response: overTotal(clientView(state), state.limits.maxBytes) };
     }
     return { text: new TextDecoder().decode(bytes), bytes: bytes.byteLength };
   } catch (error) {
@@ -379,7 +370,7 @@ async function rejectReserve(ctx, state) {
     }
     return respond(outsideWindowBody(), 422, view);
   }
-  return overTotal(view);
+  return overTotal(view, state.limits.maxBytes);
 }
 
 async function storeIngest(ctx, batch, state = null) {
@@ -388,33 +379,55 @@ async function storeIngest(ctx, batch, state = null) {
   const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])].sort();
   const willKeep = points.length + workouts.length > 0;
   const relaxed = Boolean(state && (state.view.open || state.pending));
-  if (dates.length > MAX_INGEST_DATES) return respond(tooManyDatesBody(), 413, clientView(state));
+  if (batch.dateCap !== false && dates.length > MAX_INGEST_DATES) {
+    return respond(tooManyDatesBody(state?.limits?.maxBytes), 413, clientView(state));
+  }
 
   const perform = async () => {
-    const timeZone = resolveTimeZone(ctx.timeZone);
+    if (!willKeep) {
+      return {
+        ok: true,
+        id: null,
+        dates,
+        points: batch.samples,
+        workouts: workouts.length,
+        written: 0,
+        unchanged: 0,
+        ...batch.extra,
+      };
+    }
     const now = state?.now || requestNow(ctx);
-    const key = dates.length ? dates[dates.length - 1] : localDate(now.toISOString(), timeZone);
-    const id = `${key}/${now.toISOString()}/${crypto.randomUUID().slice(0, 8)}`;
-    const raw = { storeRaw: ctx.storeRaw, payload: batch.payload };
-    const storeRaw = shouldStoreRaw(raw);
-    const counts = await ctx.storage.insertIngest({
-      id,
-      date: key,
-      receivedAt: now.toISOString(),
-      bytes: batch.bytes,
-      payload: storeRaw ? batch.payload : null,
-      storeRaw,
-      points,
-      workouts,
-    }, { hint: batch.hint });
+    const groups = dateGroups(dates, MAX_INGEST_DATES);
+    let written = 0;
+    let unchanged = 0;
+    let id = null;
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = new Set(groups[index]);
+      const key = groups[index][groups[index].length - 1];
+      const groupId = `${key}/${now.toISOString()}/${crypto.randomUUID().slice(0, 8)}`;
+      if (index === 0) id = groupId;
+      const storeRaw = index === 0 && shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: batch.payload });
+      const counts = await ctx.storage.insertIngest({
+        id: groupId,
+        date: key,
+        receivedAt: now.toISOString(),
+        bytes: index === 0 ? batch.bytes : 0,
+        payload: storeRaw ? batch.payload : null,
+        storeRaw,
+        points: points.filter((point) => group.has(point.date)),
+        workouts: workouts.filter((workout) => group.has(workout.date)),
+      }, { hint: index === 0 ? batch.hint : undefined });
+      written += counts?.written ?? 0;
+      unchanged += counts?.unchanged ?? 0;
+    }
     return {
       ok: true,
       id,
       dates,
       points: batch.samples,
       workouts: workouts.length,
-      written: counts?.written ?? 0,
-      unchanged: counts?.unchanged ?? 0,
+      written,
+      unchanged,
       ...batch.extra,
     };
   };
@@ -433,7 +446,7 @@ async function storeIngest(ctx, batch, state = null) {
   }
 
   if (relaxed && willKeep) {
-    if (batch.bytes > state.admitRemaining) return overTotal(clientView(state));
+    if (batch.bytes > state.admitRemaining) return overTotal(clientView(state), state.limits.maxBytes);
     const nowIso = state.now.toISOString();
     const fillsNewRow = !state.row && batch.bytes >= state.limits.totalBytes;
     const closeAt = state.done || fillsNewRow ? nowIso : null;
@@ -497,6 +510,7 @@ async function acceptAppleExport(source, ctx, hint, state = null) {
       bytes: parsed.bytes,
       payload: null,
       hint,
+      dateCap: false,
     }, state);
   } catch (error) {
     if (error?.code === "PAYLOAD_TOO_LARGE") {
@@ -517,11 +531,6 @@ function trySyncBackfill(ctx) {
   const read = ctx.storage.readIngestBackfill();
   if (read && typeof read.then === "function") return null;
   const row = read || null;
-  if (!row) {
-    const has = ctx.storage.hasStoredData();
-    if (has && typeof has.then === "function") return null;
-    if (has) return null;
-  }
   const now = requestNow(ctx);
   const active = activeIngestLimits(row, ctx, now);
   if (row && row.closed_at == null && !active.view.open) return null;
@@ -556,7 +565,7 @@ async function beginIngest(req, ctx) {
   const gate = ingestGate(req, ctx);
   if (gate.cancel === "remaining") {
     await cancelStream(req.body);
-    return { response: overTotal(clientView(gate.state)) };
+    return { response: overTotal(clientView(gate.state), gate.state.limits.maxBytes) };
   }
   if (gate.cancel === "ceiling") {
     await cancelStream(req.body);
@@ -566,6 +575,7 @@ async function beginIngest(req, ctx) {
         response: respond(payloadTooLargeBody(MAX_PAYLOAD_CHARS, {
           closed: !state.view.open && !state.pending,
           duringBackfill: Boolean(state.view.open || state.pending),
+          maxBytes: state.limits.maxBytes,
         }), 413, clientView(state)),
       };
     }
@@ -590,7 +600,7 @@ async function ingest(req, ctx) {
   try {
     const bytes = await readIngestBytes(req, state.byteLimit);
     size = bytes.byteLength;
-    if ((state.view.open || state.pending) && size > state.admitRemaining) return overTotal(clientView(state));
+    if ((state.view.open || state.pending) && size > state.admitRemaining) return overTotal(clientView(state), state.limits.maxBytes);
     if (looksLikeAppleExport(bytes)) appleBytes = bytes;
     else text = new TextDecoder().decode(bytes);
   } catch (error) {
@@ -599,6 +609,7 @@ async function ingest(req, ctx) {
         return respond(payloadTooLargeBody(MAX_PAYLOAD_CHARS, {
           closed: !state.view.open && !state.pending,
           duringBackfill: Boolean(state.view.open || state.pending),
+          maxBytes: state.limits.maxBytes,
         }), 413, clientView(state));
       }
       return tooLarge(state);
@@ -658,7 +669,7 @@ async function rejectDeclaredTotal(req, state) {
   if (declared == null || !(state.view.open || state.pending)) return null;
   if (declared <= state.byteLimit && declared > state.admitRemaining) {
     await cancelStream(req.body);
-    return overTotal(clientView(state));
+    return overTotal(clientView(state), state.limits.maxBytes);
   }
   return null;
 }
@@ -801,8 +812,9 @@ async function storeParsed(req, ctx, parsed, text, state, { recency = false, byt
   let workouts = parsed.workouts;
   let extra;
   let hint = null;
-  const minDate = resolveMinDate(ctx.ingestMinDate);
+  const minDate = resolveMinDate(ctx.ingestMinDate, { now: state.now, timeZone: ctx.timeZone });
   if (recency) {
+    const configuredHint = exportHint(state.limits.maxBytes);
     const filtered = filterRecent(points, workouts, {
       now: state.now,
       timeZone: resolveTimeZone(ctx.timeZone),
@@ -812,11 +824,11 @@ async function storeParsed(req, ctx, parsed, text, state, { recency = false, byt
     });
     const nothing = filtered.points.length === 0 && filtered.workouts.length === 0;
     if (nothing && filtered.dropped_early > 0) {
-      await ctx.storage.setExportHint(EXPORT_HINT);
+      await ctx.storage.setExportHint(configuredHint);
       return respond(beforeMinDateBody(minDate), 422, clientView(state));
     }
     if (nothing && !state.view.open && !state.pending && filtered.dropped_stale > 0) {
-      await ctx.storage.setExportHint(EXPORT_HINT);
+      await ctx.storage.setExportHint(configuredHint);
       return respond(outsideWindowBody(), 422, clientView(state));
     }
     points = filtered.points;
@@ -826,7 +838,7 @@ async function storeParsed(req, ctx, parsed, text, state, { recency = false, byt
       dropped_future: filtered.dropped_future,
       dropped_early: filtered.dropped_early,
     };
-    if (filtered.dropped_stale >= STALE_HINT_AT) hint = EXPORT_HINT;
+    if (filtered.dropped_stale >= STALE_HINT_AT) hint = configuredHint;
   }
   const limited = await claimQuota(req, ctx, state);
   if (limited) return limited;
@@ -871,7 +883,7 @@ async function importAppleChunk(req, ctx) {
   const points = (body.points || []).filter((point) => allow.has(point.metric));
   const workouts = body.workouts || [];
   const samples = points.reduce((sum, point) => sum + point.n, 0);
-  return storeIngest(ctx, { points, workouts, samples, bytes: utf8ByteLength(text), payload: null });
+  return storeIngest(ctx, { points, workouts, samples, bytes: utf8ByteLength(text), payload: null, dateCap: false });
 }
 
 async function summary(url, storage) {

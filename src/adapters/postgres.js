@@ -1,8 +1,8 @@
 import pg from "pg";
 import { shouldStoreRaw } from "../core/aggregate.js";
-import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { dateSpan, jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
 import { migrationFiles } from "./migrate.js";
 import {
   DELETE_HINT,
@@ -11,7 +11,6 @@ import {
   INSERT_RAW,
   LIST_METRICS,
   METRIC_RANGE,
-  POINTS_BETWEEN,
   POINTS_FOR_DATE,
   CLAIM_QUOTA,
   CLOSE_BACKFILL,
@@ -45,6 +44,14 @@ const UPSERT_WORKOUTS_JSON =
   "SELECT r.n, r.s, r.d, r.m, r.k FROM jsonb_to_recordset(?::jsonb) " +
   "AS r(n text, s text, d text, m float8, k float8) " +
   "ON CONFLICT(name, start) DO UPDATE SET date = excluded.date, duration_min = excluded.duration_min, kcal = excluded.kcal";
+
+const POINTS_ON_DATES =
+  "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily " +
+  "WHERE date IN (SELECT value FROM jsonb_array_elements_text(?::jsonb))";
+
+const WORKOUTS_ON_DATES =
+  "SELECT name, start, date, duration_min, kcal FROM workouts " +
+  "WHERE date IN (SELECT value FROM jsonb_array_elements_text(?::jsonb))";
 
 const INSERT_WORKOUTS_JSON =
   "INSERT INTO workouts (name, start, date, duration_min, kcal) " +
@@ -94,11 +101,16 @@ export function createPostgresStorageFromPool(pool) {
       return result.rows.length > 0;
     },
     async loadStored(dates) {
-      const span = dateSpan(dates);
-      if (!span) return { points: [], workouts: [] };
-      const points = await pool.query(toPostgres(POINTS_BETWEEN), span);
-      const workouts = await pool.query(toPostgres(WORKOUTS_RANGE), span);
-      return { points: points.rows, workouts: workouts.rows };
+      const points = [];
+      const workouts = [];
+      for (const group of dateGroups(dates, MAX_INGEST_DATES)) {
+        const json = JSON.stringify(group);
+        const pointRows = await pool.query(toPostgres(POINTS_ON_DATES), [json]);
+        const workoutRows = await pool.query(toPostgres(WORKOUTS_ON_DATES), [json]);
+        points.push(...pointRows.rows);
+        workouts.push(...workoutRows.rows);
+      }
+      return { points, workouts };
     },
     async countNewIngestDays(points, workouts) {
       const dates = [...new Set([...(points || []).map((point) => point.date), ...(workouts || []).map((workout) => workout.date)])];
@@ -106,20 +118,37 @@ export function createPostgresStorageFromPool(pool) {
     },
     async reserveIngestBackfill(args) {
       const addDays = await this.countNewIngestDays(args.points, args.workouts);
-      const result = await pool.query(toPostgres(RESERVE_BACKFILL), [
-        args.openedAt,
-        args.closeAt,
-        args.addBytes,
-        addDays,
-        args.deadline,
-        args.totalBytes,
-        args.nowIso,
-        args.nowIso,
-      ]);
-      const reserved = normalizeBackfill(result.rows[0]);
-      if (!reserved) return null;
-      if (args.write) await args.write();
-      return reserved;
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query(toPostgres(RESERVE_BACKFILL), [
+          args.openedAt,
+          args.closeAt,
+          args.addBytes,
+          addDays,
+          args.deadline,
+          args.totalBytes,
+          args.nowIso,
+          args.nowIso,
+        ]);
+        const reserved = normalizeBackfill(result.rows[0]);
+        if (!reserved) {
+          await client.query("ROLLBACK");
+          return null;
+        }
+        if (args.write) await args.write();
+        await client.query("COMMIT");
+        return reserved;
+      } catch (error) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // The connection may already be unusable.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
       const result = await pool.query(toPostgres(FINISH_BACKFILL), [

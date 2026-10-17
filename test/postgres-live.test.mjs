@@ -105,3 +105,31 @@ test("postgres keeps concurrent ingest under the stored total", { skip: url ? fa
     await pool.end();
   }
 });
+
+test("postgres rolls back a reservation when the write fails", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
+  const pool = new pg.Pool({ connectionString: url, max: 4 });
+  const storage = createPostgresStorageFromPool(pool);
+  try {
+    await storage.migrate();
+    await pool.query("DELETE FROM ingest_backfill");
+    await pool.query("DELETE FROM points_daily");
+    storage.insertIngest = async () => {
+      throw new Error("write failed");
+    };
+    await assert.rejects(() => storage.reserveIngestBackfill({
+      openedAt: NOW.toISOString(),
+      closeAt: NOW.toISOString(),
+      addBytes: 80,
+      totalBytes: 80,
+      deadline: "2026-10-19T12:30:00.000Z",
+      nowIso: NOW.toISOString(),
+      points: [],
+      workouts: [],
+      write: () => storage.insertIngest({}),
+    }), /write failed/);
+    const row = await pool.query("SELECT COUNT(*)::int AS n FROM ingest_backfill");
+    assert.equal(row.rows[0].n, 0);
+  } finally {
+    await pool.end();
+  }
+});

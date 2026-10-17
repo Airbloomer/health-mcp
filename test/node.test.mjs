@@ -22,10 +22,14 @@ test("migration SQL stays portable", () => {
     "0003_ingest_guards.sql",
     "0004_ingest_backfill.sql",
     "0005_quota_window_bigint.sql",
+    "0006_ingest_backfill_deadline.sql",
   ]);
   assert.match(files[2].sql, /window_start INTEGER NOT NULL/);
   assert.doesNotMatch(files[2].sql, /BIGINT/);
+  assert.doesNotMatch(files[3].sql, /deadline/);
   assert.match(files[4].sql, /window_start BIGINT NOT NULL/);
+  assert.match(files[5].sql, /deadline/);
+  assert.match(files[5].sql, /total_bytes/);
   for (const file of files) {
     assert.doesNotMatch(file.sql, /AUTOINCREMENT|WITHOUT ROWID|INSERT OR REPLACE|PRAGMA/i);
   }
@@ -177,7 +181,7 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
   let pointReads = 0;
   const rowsFor = (sql) => {
     if (sql.includes("GROUP BY metric")) return [{ metric: "step_count" }];
-    if (sql.includes("FROM points_daily") && sql.includes(">=")) {
+    if (sql.includes("FROM points_daily") && (sql.includes(">=") || sql.includes("jsonb_array_elements_text"))) {
       return [{
         date: summaryDate,
         metric: "step_count",
@@ -200,7 +204,7 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
         n: "1",
       }];
     }
-    if (sql.includes("FROM workouts") && sql.includes(">=")) {
+    if (sql.includes("FROM workouts") && (sql.includes(">=") || sql.includes("jsonb_array_elements_text"))) {
       return [{ name: "Walk", start: "2026-10-14 12:00:00 -0700", date: summaryDate, duration_min: "30", kcal: "120" }];
     }
     if (sql.startsWith("SELECT name")) {
