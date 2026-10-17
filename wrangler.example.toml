@@ -40,6 +40,7 @@ HEALTH_TIMEZONE = "America/Los_Angeles"
 # INGEST_BACKFILL_MAX_PER_HOUR = "60"
 # INGEST_BACKFILL_MAX_TOTAL_BYTES = "500000000"
 # INGEST_MIN_DATE = "2000-01-01"
+# A real date is clamped to 1970-01-01 through today. An invalid date uses the default.
 
 [[d1_databases]]
 binding = "DB"

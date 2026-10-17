@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { activeUrlToken, authed, redactRequestTarget } from "../core/auth.js";
 import { handleRequest, syncIngestBackfill } from "../core/http.js";
-import { backfillTotalBody, payloadTooLargeBody, resolveMaxBodyBytes } from "../core/ingest-guard.js";
+import { backfillTotalBody, payloadTooLargeBody } from "../core/ingest-guard.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
 import { openPostgres } from "./postgres.js";
@@ -78,15 +78,6 @@ function requestIsAuthed(req, token, urlToken) {
   });
 }
 
-function preAuthLimit(req, ingestMaxBodyBytes) {
-  if (requestPath(req) === "/mcp") return MAX_MCP_BYTES;
-  if (requestPath(req) === "/import/apple-health") return MAX_APPLE_EXPORT_BYTES;
-  if (requestPath(req) === "/import/apple-health/chunk") return MAX_PAYLOAD_CHARS;
-  const type = String(req.headers["content-type"] || "");
-  if (type.includes("json") && isJsonIngest(req)) return resolveMaxBodyBytes(ingestMaxBodyBytes);
-  return MAX_PAYLOAD_CHARS;
-}
-
 function tooLargeError(req, limit, state) {
   const error = new Error("payload_too_large");
   error.code = "PAYLOAD_TOO_LARGE";
@@ -96,6 +87,7 @@ function tooLargeError(req, limit, state) {
     error.detail = payloadTooLargeBody(limit, {
       closed: state ? !relaxed : false,
       duringBackfill: relaxed,
+      maxBytes: state?.limits?.maxBytes,
     });
   }
   return error;
@@ -161,10 +153,7 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
       };
       if (!requestIsAuthed(req, token, urlToken)) {
         writeJson(res, 401, { error: "unauthorized" });
-        const declared = declaredByteLength(req);
-        const limit = preAuthLimit(req, ingestMaxBodyBytes);
-        if (declared != null && declared > limit) req.destroy();
-        else req.resume();
+        req.destroy();
         return;
       }
       let request;
@@ -186,7 +175,7 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
           && declared > state.admitRemaining
           && declared <= limit
         ) {
-          writeJson(res, 413, backfillTotalBody());
+          writeJson(res, 413, backfillTotalBody(state.limits.maxBytes));
           req.destroy();
           return;
         }

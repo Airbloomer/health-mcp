@@ -1,11 +1,12 @@
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
-import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { dateSpan, jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
 import {
   D1_BATCH_LIMIT,
   CLOSE_BACKFILL,
+  DELETE_EMPTY_BACKFILL,
   DELETE_HINT,
   FINISH_BACKFILL,
   HAS_STORED_DATA,
@@ -13,10 +14,11 @@ import {
   INSERT_WORKOUTS_JSON,
   LIST_METRICS,
   METRIC_RANGE,
-  POINTS_BETWEEN,
   POINTS_FOR_DATE,
+  POINTS_ON_DATES,
   READ_BACKFILL,
   READ_HINT,
+  RELEASE_BACKFILL,
   REPLACE_POINTS_JSON,
   RESERVE_BACKFILL,
   CLAIM_QUOTA,
@@ -24,6 +26,7 @@ import {
   UPSERT_POINTS_JSON,
   UPSERT_WORKOUTS_JSON,
   WORKOUTS_FOR_DATE,
+  WORKOUTS_ON_DATES,
   WORKOUTS_RANGE,
 } from "./statements.js";
 
@@ -58,12 +61,13 @@ export class D1Storage {
   }
 
   async loadStored(dates) {
-    const span = dateSpan(dates);
-    if (!span) return { points: [], workouts: [] };
-    const [points, workouts] = await Promise.all([
-      this.rowsFor(POINTS_BETWEEN, span[0], span[1]),
-      this.rowsFor(WORKOUTS_RANGE, span[0], span[1]),
-    ]);
+    const points = [];
+    const workouts = [];
+    for (const group of dateGroups(dates, MAX_INGEST_DATES)) {
+      const json = JSON.stringify(group);
+      points.push(...await this.rowsFor(POINTS_ON_DATES, json));
+      workouts.push(...await this.rowsFor(WORKOUTS_ON_DATES, json));
+    }
     return { points, workouts };
   }
 
@@ -97,7 +101,20 @@ export class D1Storage {
     const results = await this.run(() => this.db.batch([statement]));
     const reserved = normalizeBackfill(results?.[0]?.results?.[0]);
     if (!reserved) return null;
-    if (args.write) await args.write();
+    try {
+      if (args.write) await args.write();
+    } catch (error) {
+      const release = this.db.prepare(RELEASE_BACKFILL).bind(
+        args.addBytes,
+        addDays,
+        addDays,
+        reserved.closed_at,
+        args.addBytes,
+      );
+      const clear = this.db.prepare(DELETE_EMPTY_BACKFILL).bind();
+      await this.run(() => this.db.batch([release, clear]));
+      throw error;
+    }
     return reserved;
   }
 

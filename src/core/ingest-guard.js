@@ -19,13 +19,28 @@ export const DEFAULT_INGEST_BACKFILL_MAX_BYTES = 5_000_000;
 /** Hard upper bound for the per-request import cap. */
 export const MAX_INGEST_BACKFILL_MAX_BYTES = 10_000_000;
 
-/** Distinct dates allowed in one ingest request. */
+/** Distinct dates allowed in one ingest request, and in one stored batch. */
 export const MAX_INGEST_DATES = 366;
+
+/** Unique sorted dates, sliced so each group stays within `size`. */
+export function dateGroups(dates, size = MAX_INGEST_DATES) {
+  const unique = [...new Set(dates)].filter((date) => date != null && date !== "").sort();
+  const groups = [];
+  for (let index = 0; index < unique.length; index += size) groups.push(unique.slice(index, index + size));
+  return groups;
+}
 
 /** Earliest calendar date an import may store. */
 export const DEFAULT_INGEST_MIN_DATE = "2000-01-01";
 
-export const CHUNK_HINT = "Import history in chunks of 5 MB or less.";
+/** Lowest calendar date a configured minimum may name. */
+export const INGEST_MIN_DATE_FLOOR = "1970-01-01";
+
+/**
+ * Close time written for a database that already had rows. Public responses
+ * report this as null.
+ */
+const SEEDED_CLOSE_AT = "1970-01-01T00:00:00.000Z";
 
 /** Accepted posts per token per UTC hour while the initial import window is open. */
 export const DEFAULT_INGEST_BACKFILL_MAX_PER_HOUR = 60;
@@ -47,7 +62,28 @@ export const MAX_INGEST_BACKFILL_HOURS = 24 * 366;
 
 export const INITIAL_IMPORT_CLOSED = "The initial import window is closed.";
 
-export const SHORTER_DATE_RANGE = `Send a shorter date range. ${CHUNK_HINT}`;
+export function byteLabel(maxBytes) {
+  const bytes = resolveBackfillMaxBytes(maxBytes);
+  if (bytes % 1_000_000 === 0) return `${bytes / 1_000_000} MB`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${bytes} bytes`;
+}
+
+export function chunkHint(maxBytes) {
+  return `Import history in chunks of ${byteLabel(maxBytes)} or less.`;
+}
+
+export function shorterDateRange(maxBytes) {
+  return `Send a shorter date range. ${chunkHint(maxBytes)}`;
+}
+
+export function exportHint(maxBytes) {
+  return `This export looks misconfigured: it sent too much history or it is posting too often. ${chunkHint(maxBytes)} Follow Recommended export settings in the README.`;
+}
+
+export const CHUNK_HINT = chunkHint();
+
+export const SHORTER_DATE_RANGE = shorterDateRange();
 
 /** A payload that drops at least this many dated records looks like a full history. */
 export const STALE_HINT_AT = 50;
@@ -55,8 +91,7 @@ export const STALE_HINT_AT = 50;
 /** Dates after today plus this many days are dropped. Covers timezone and device skew. */
 export const FUTURE_SKEW_DAYS = 1;
 
-export const EXPORT_HINT =
-  "This export looks misconfigured: it sent too much history or it is posting too often. Import history in chunks of 5 MB or less. Follow Recommended export settings in the README.";
+export const EXPORT_HINT = exportHint();
 
 function configuredInteger(value) {
   if (typeof value === "number" && Number.isInteger(value)) return value;
@@ -106,9 +141,33 @@ export function resolveBackfillHours(value) {
   return resolveAtLeastOne(value, DEFAULT_INGEST_BACKFILL_HOURS, MAX_INGEST_BACKFILL_HOURS);
 }
 
-export function resolveMinDate(value) {
-  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
-  return DEFAULT_INGEST_MIN_DATE;
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function isRealIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  if (month < 1 || month > 12 || day < 1) return false;
+  const lengths = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= lengths[month - 1];
+}
+
+/**
+ * A real date is clamped to 1970-01-01 through today in `timeZone`.
+ * Anything that is not a real calendar day uses the default.
+ */
+export function resolveMinDate(value, { now, timeZone } = {}) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!isRealIsoDate(trimmed)) return DEFAULT_INGEST_MIN_DATE;
+  const today = now instanceof Date && !Number.isNaN(now.getTime())
+    ? localDate(now.toISOString(), timeZone)
+    : null;
+  if (trimmed < INGEST_MIN_DATE_FLOOR) return INGEST_MIN_DATE_FLOOR;
+  if (isRealIsoDate(today) && trimmed > today) return today;
+  return trimmed;
 }
 
 export function backfillLimits(ctx = {}) {
@@ -163,9 +222,10 @@ export function backfillStatus(row, limits, now) {
   const expired = !(now.getTime() < Date.parse(scheduled));
   const full = Number(row.bytes) >= total;
   const open = row.closed_at == null && !expired && !full;
+  const closesAt = row.closed_at == null ? scheduled : row.closed_at;
   return {
     open,
-    closes_at: row.closed_at || scheduled,
+    closes_at: closesAt === SEEDED_CLOSE_AT ? null : closesAt,
     bytes_remaining: open ? Math.max(0, total - Number(row.bytes)) : 0,
     pending: false,
   };
@@ -210,11 +270,11 @@ export function secondsUntilNextHour(now) {
   return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }
 
-export function payloadTooLargeBody(limit, { closed = false, duringBackfill = false } = {}) {
+export function payloadTooLargeBody(limit, { closed = false, duringBackfill = false, maxBytes } = {}) {
   if (duringBackfill) {
     return {
       error: "payload_too_large",
-      message: `Body exceeds ${limit} bytes. ${SHORTER_DATE_RANGE}`,
+      message: `Body exceeds ${limit} bytes. ${shorterDateRange(maxBytes)}`,
     };
   }
   const tail = closed
@@ -241,17 +301,17 @@ export function outsideWindowBody() {
   };
 }
 
-export function backfillTotalBody() {
+export function backfillTotalBody(maxBytes) {
   return {
     error: "payload_too_large",
-    message: `This chunk would pass the initial import total. ${SHORTER_DATE_RANGE}`,
+    message: `This chunk would pass the initial import total. ${shorterDateRange(maxBytes)}`,
   };
 }
 
-export function tooManyDatesBody() {
+export function tooManyDatesBody(maxBytes) {
   return {
     error: "payload_too_large",
-    message: `This request covers more than ${MAX_INGEST_DATES} dates. Send it in chunks of ${MAX_INGEST_DATES} dates or fewer. ${CHUNK_HINT}`,
+    message: `This request covers more than ${MAX_INGEST_DATES} dates. Send it in chunks of ${MAX_INGEST_DATES} dates or fewer. ${chunkHint(maxBytes)}`,
   };
 }
 

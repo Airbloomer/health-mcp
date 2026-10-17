@@ -12,7 +12,7 @@ import { startServer } from "../src/adapters/node.js";
 import { applySqliteMigrations, createSqliteStorage } from "../src/adapters/sqlite.js";
 import { RESERVE_BACKFILL } from "../src/adapters/statements.js";
 import { handleRequest } from "../src/core/http.js";
-import { EXPORT_HINT, MAX_INGEST_DATES } from "../src/core/ingest-guard.js";
+import { EXPORT_HINT, MAX_INGEST_DATES, resolveMinDate } from "../src/core/ingest-guard.js";
 import { MemoryStorage } from "../src/core/memory.js";
 
 const NOW = new Date("2026-10-16T12:30:00Z");
@@ -340,7 +340,8 @@ test("one request reads a date range and stays under the query bound", async () 
   );
   assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
   assert.ok(counter.n < 20, `queries ${counter.n}`);
-  assert.ok(counter.sql.some((sql) => sql.includes("date >= ?") && sql.includes("date <= ?")));
+  assert.ok(counter.sql.some((sql) => sql.includes("json_each")));
+  assert.equal(counter.sql.some((sql) => sql.includes("FROM points_daily") && sql.includes("date >= ?")), false);
   assert.equal(counter.sql.some((sql) => /WHERE date = \?/.test(sql)), false);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, 300);
   db.close();
@@ -534,7 +535,247 @@ test("an unauthenticated request is rejected before the window or the body is re
     assert.equal(hung.body.includes("window"), false);
     assert.equal(hung.body.includes("payload_too_large"), false);
     assert.equal(reads, 0);
+
+    const chunked = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: "127.0.0.1",
+        port,
+        path: "/ingest",
+        method: "POST",
+        headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
+      }, (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      const timer = setTimeout(() => {
+        req.destroy();
+        reject(new Error("timed out"));
+      }, 2000);
+      req.on("error", () => {
+        clearTimeout(timer);
+        resolve({ status: 0, body: "" });
+      });
+      req.write("{\"data\":");
+    });
+    assert.ok(chunked.status === 401 || chunked.status === 0);
+    if (chunked.status === 401) assert.equal(JSON.parse(chunked.body).error, "unauthorized");
+    assert.equal(reads, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+function appleSteps(days, start = "2010-01-01") {
+  const records = [];
+  for (let index = 0; index < days; index += 1) {
+    const date = shiftDate(start, index);
+    records.push(`<Record type="HKQuantityTypeIdentifierStepCount" unit="count" value="1" startDate="${date} 09:00:00 +0000" endDate="${date} 09:00:00 +0000"/>`);
+  }
+  return `<HealthData>${records.join("")}</HealthData>`;
+}
+
+test("an Apple import longer than 366 days is stored in bounded batches", async () => {
+  for (const days of [400, 1000]) {
+    const db = new Database(":memory:");
+    applySqliteMigrations(db);
+    const counter = { n: 0, sql: [] };
+    const storage = new D1Storage(d1FromSqlite(db, counter));
+    const batches = [];
+    const original = storage.insertIngest.bind(storage);
+    storage.insertIngest = async (batch, options) => {
+      const before = counter.n;
+      const result = await original(batch, options);
+      const groupDates = new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)]);
+      batches.push({ dates: groupDates.size, queries: counter.n - before });
+      return result;
+    };
+    const response = await handleRequest(new Request("http://localhost/import/apple-health", {
+      method: "POST",
+      headers: { authorization: "Bearer tok", "content-type": "application/xml" },
+      body: appleSteps(days),
+    }), ctx(storage));
+    assert.equal(response.status, 200, `${days} ${JSON.stringify(await response.clone().json())}`);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, days);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 0);
+    assert.ok(batches.length > 1, `${days} batches ${batches.length}`);
+    for (const batch of batches) {
+      assert.ok(batch.dates <= MAX_INGEST_DATES, `${days} dates ${batch.dates}`);
+      assert.ok(batch.queries < 20, `${days} queries ${batch.queries}`);
+    }
+    const follow = await handleRequest(
+      request(JSON.stringify(steps("2005-01-01"))),
+      ctx(storage),
+    );
+    assert.equal(follow.status, 200, JSON.stringify(await follow.clone().json()));
+    assert.equal((await follow.json()).backfill.open, true);
+    db.close();
+  }
+});
+
+test("an Apple export on ingest and a chunk over 366 dates are not date-capped", async () => {
+  const xml = await handleRequest(
+    request(appleSteps(400), { "content-type": "text/xml" }),
+    ctx(new MemoryStorage()),
+  );
+  assert.equal(xml.status, 200, JSON.stringify(await xml.clone().json()));
+  const points = [];
+  for (let index = 0; index < 400; index += 1) {
+    const date = shiftDate("2012-01-01", index);
+    points.push({
+      metric: "step_count",
+      date,
+      sum_qty: 1,
+      last_qty: 1,
+      last_ts: `${date} 09:00:00 +0000`,
+      units: "count",
+      n: 1,
+    });
+  }
+  const chunk = await handleRequest(new Request("http://localhost/import/apple-health/chunk", {
+    method: "POST",
+    headers: { authorization: "Bearer tok", "content-type": "application/json" },
+    body: JSON.stringify({ points, workouts: [] }),
+  }), ctx(new MemoryStorage()));
+  assert.equal(chunk.status, 200, JSON.stringify(await chunk.clone().json()));
+  assert.equal((await chunk.json()).points, 400);
+});
+
+test("an empty body with raw storage on does not write a row or close the window", async () => {
+  const storage = new MemoryStorage();
+  const body = JSON.stringify({ data: { metrics: [], workouts: [] } });
+  const response = await handleRequest(request(body), ctx(storage, { storeRaw: true }));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.backfill.open, false);
+  assert.equal(payload.backfill.closes_at, null);
+  assert.equal(payload.backfill.bytes_remaining, 0);
+  assert.equal(storage.payloads.length, 0);
+  assert.equal(storage.backfill, null);
+  const next = await handleRequest(request(JSON.stringify(steps("2020-01-01"))), ctx(storage, { storeRaw: true }));
+  assert.equal(next.status, 200);
+  assert.equal((await next.json()).backfill.open, true);
+  assert.equal(storage.backfill.closed_at, null);
+  assert.equal(storage.payloads.length, 1);
+});
+
+test("the hint uses the configured cap", async () => {
+  const storage = new MemoryStorage();
+  const response = await handleRequest(
+    request(JSON.stringify(history(MAX_INGEST_DATES + 1))),
+    ctx(storage, { ingestBackfillMaxBytes: 2_000_000 }),
+  );
+  assert.equal(response.status, 413);
+  const payload = await response.json();
+  assert.match(payload.message, /2 MB/);
+  assert.equal(payload.message.includes("5 MB"), false);
+  assert.equal(payload.backfill.open, false);
+});
+
+test("the minimum date is clamped and invalid values use the default", async () => {
+  assert.equal(resolveMinDate("0000-01-01", { now: NOW, timeZone: "UTC" }), "1970-01-01");
+  assert.equal(resolveMinDate("9999-12-31", { now: NOW, timeZone: "UTC" }), "2026-10-16");
+  assert.equal(resolveMinDate("2026-02-31", { now: NOW, timeZone: "UTC" }), "2000-01-01");
+  assert.equal(resolveMinDate("2026-13-45", { now: NOW, timeZone: "UTC" }), "2000-01-01");
+  assert.equal(resolveMinDate("2015-06-01", { now: NOW, timeZone: "UTC" }), "2015-06-01");
+
+  const early = new MemoryStorage();
+  const admitted = await handleRequest(
+    request(JSON.stringify(steps("1970-01-01"))),
+    ctx(early, { ingestMinDate: "0000-01-01" }),
+  );
+  assert.equal(admitted.status, 200, JSON.stringify(await admitted.clone().json()));
+  assert.equal(early.points.size, 1);
+  const blocked = await handleRequest(
+    request(JSON.stringify(steps("1900-01-01"))),
+    ctx(new MemoryStorage(), { ingestMinDate: "0000-01-01" }),
+  );
+  assert.equal(blocked.status, 422);
+  assert.match((await blocked.json()).message, /1970-01-01/);
+
+  const late = new MemoryStorage();
+  const rejected = await handleRequest(
+    request(JSON.stringify(steps("2020-01-01"))),
+    ctx(late, { ingestMinDate: "9999-12-31" }),
+  );
+  assert.equal(rejected.status, 422);
+  assert.equal(late.backfill, null);
+});
+
+test("a sparse date list uses the date index", () => {
+  const db = new Database(":memory:");
+  applySqliteMigrations(db);
+  const plan = db.prepare(
+    "EXPLAIN QUERY PLAN SELECT date, metric FROM points_daily WHERE date IN (SELECT value FROM json_each(?))",
+  ).all(JSON.stringify(["2000-01-01", "2026-10-16"]));
+  const text = plan.map((row) => row.detail).join(" ");
+  assert.match(text, /SEARCH/);
+  assert.equal(text.includes("SCAN points_daily"), false);
+  db.close();
+});
+
+test("a failed write releases the reservation and a close it caused", async () => {
+  const storage = createSqliteStorage(":memory:");
+  const point = {
+    date: "2020-01-02",
+    metric: "step_count",
+    sum_qty: 1,
+    last_qty: 1,
+    last_ts: "2020-01-02 09:00:00",
+    units: "count",
+    n: 1,
+  };
+  await storage.reserveIngestBackfill({
+    openedAt: NOW.toISOString(),
+    closeAt: null,
+    addBytes: 10,
+    totalBytes: 100,
+    deadline: DEADLINE,
+    nowIso: NOW.toISOString(),
+    points: [point],
+    workouts: [],
+    write: async () => {},
+  });
+  storage.insertIngest = async () => {
+    throw new Error("write failed");
+  };
+  await assert.rejects(() => storage.reserveIngestBackfill({
+    openedAt: NOW.toISOString(),
+    closeAt: NOW.toISOString(),
+    addBytes: 90,
+    totalBytes: 100,
+    deadline: DEADLINE,
+    nowIso: NOW.toISOString(),
+    points: [{ ...point, date: "2020-01-03" }],
+    workouts: [],
+    write: () => storage.insertIngest({}),
+  }), /write failed/);
+  const row = await storage.readIngestBackfill();
+  assert.equal(row.bytes, 10);
+  assert.equal(row.closed_at, null);
+  assert.equal(await storage.hasStoredData(), false);
+  await storage.close();
+});
+
+test("a seeded window does not report the placeholder close time", async () => {
+  const upgrade = new Database(":memory:");
+  upgrade.exec(migrationFiles()[0].sql);
+  upgrade.prepare("INSERT INTO points (metric, ts, date, units, qty) VALUES (?, ?, ?, ?, ?)").run(
+    "step_count",
+    "2024-01-02 09:00:00",
+    "2024-01-02",
+    "count",
+    4,
+  );
+  applySqliteMigrations(upgrade);
+  const stored = upgrade.prepare("SELECT closed_at FROM ingest_backfill").get();
+  assert.equal(stored.closed_at, "1970-01-01T00:00:00.000Z");
+  const storage = new D1Storage(d1FromSqlite(upgrade));
+  const response = await handleRequest(request(JSON.stringify(steps("2026-10-16"))), ctx(storage));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.backfill.open, false);
+  assert.equal(payload.backfill.closes_at, null);
+  assert.equal(payload.backfill.bytes_remaining, 0);
+  upgrade.close();
 });

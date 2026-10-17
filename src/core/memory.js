@@ -78,12 +78,16 @@ export class MemoryStorage {
       return { ...this.backfill };
     }
     if (this.backfill.closed_at) return null;
-    if (!(nowIso < this.backfill.deadline)) return null;
-    if (this.backfill.bytes + addBytes > this.backfill.total_bytes) return null;
+    const deadlineAt = this.backfill.deadline || deadline;
+    const cap = this.backfill.total_bytes == null ? totalBytes : this.backfill.total_bytes;
+    if (!(nowIso < deadlineAt)) return null;
+    if (this.backfill.bytes + addBytes > cap) return null;
+    this.backfill.deadline = deadlineAt;
+    this.backfill.total_bytes = cap;
     this.backfill.bytes += addBytes;
     this.backfill.days += addDays;
     if (closeAt) this.backfill.closed_at = closeAt;
-    else if (this.backfill.bytes >= this.backfill.total_bytes) this.backfill.closed_at = nowIso;
+    else if (this.backfill.bytes >= cap) this.backfill.closed_at = nowIso;
     return { ...this.backfill };
   }
 

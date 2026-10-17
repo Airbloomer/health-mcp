@@ -30,6 +30,16 @@ export const POINTS_FOR_DATE =
 export const POINTS_BETWEEN =
   "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily WHERE date >= ? AND date <= ?";
 
+/** Points for an explicit date list. `?` is a JSON array of YYYY-MM-DD strings. */
+export const POINTS_ON_DATES =
+  "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily " +
+  "WHERE date IN (SELECT value FROM json_each(?))";
+
+/** Workouts for an explicit date list. `?` is a JSON array of YYYY-MM-DD strings. */
+export const WORKOUTS_ON_DATES =
+  "SELECT name, start, date, duration_min, kcal FROM workouts " +
+  "WHERE date IN (SELECT value FROM json_each(?))";
+
 /** One statement for many guarded point rows. `?` is a JSON array. */
 export const UPSERT_POINTS_JSON =
   "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) " +
@@ -107,14 +117,31 @@ export const RESERVE_BACKFILL =
   "ON CONFLICT(id) DO UPDATE SET " +
   "bytes = ingest_backfill.bytes + excluded.bytes, " +
   "days = ingest_backfill.days + excluded.days, " +
+  "deadline = COALESCE(ingest_backfill.deadline, excluded.deadline), " +
+  "total_bytes = COALESCE(ingest_backfill.total_bytes, excluded.total_bytes), " +
   "closed_at = CASE " +
   "WHEN excluded.closed_at IS NOT NULL THEN excluded.closed_at " +
-  "WHEN ingest_backfill.bytes + excluded.bytes >= ingest_backfill.total_bytes THEN ? " +
+  "WHEN ingest_backfill.bytes + excluded.bytes >= COALESCE(ingest_backfill.total_bytes, excluded.total_bytes) THEN ? " +
   "ELSE ingest_backfill.closed_at END " +
   "WHERE ingest_backfill.closed_at IS NULL " +
-  "AND ingest_backfill.bytes + excluded.bytes <= ingest_backfill.total_bytes " +
-  "AND ? < ingest_backfill.deadline " +
+  "AND ingest_backfill.bytes + excluded.bytes <= COALESCE(ingest_backfill.total_bytes, excluded.total_bytes) " +
+  "AND ? < COALESCE(ingest_backfill.deadline, excluded.deadline) " +
   "RETURNING opened_at, closed_at, bytes, days, deadline, total_bytes";
+
+/**
+ * Undo one reservation. The close is cleared only when it still equals the
+ * timestamp this reservation wrote. A bind of NULL does not match.
+ */
+export const RELEASE_BACKFILL =
+  "UPDATE ingest_backfill SET " +
+  "bytes = bytes - ?, " +
+  "days = CASE WHEN days >= ? THEN days - ? ELSE 0 END, " +
+  "closed_at = CASE WHEN closed_at = ? THEN NULL ELSE closed_at END " +
+  "WHERE id = 1 AND bytes >= ?";
+
+/** Drop a window that this failed request created and then fully released. */
+export const DELETE_EMPTY_BACKFILL =
+  "DELETE FROM ingest_backfill WHERE id = 1 AND bytes = 0 AND days = 0 AND closed_at IS NULL";
 
 /** Close the window, creating a closed row when none exists. Already closed is unchanged. */
 export const FINISH_BACKFILL =

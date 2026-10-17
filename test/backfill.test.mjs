@@ -11,7 +11,7 @@ import {
   MAX_INGEST_BACKFILL_MAX_BYTES,
   MAX_INGEST_BACKFILL_MAX_PER_HOUR,
   MAX_INGEST_BACKFILL_MAX_TOTAL_BYTES,
-  SHORTER_DATE_RANGE,
+  shorterDateRange,
   backfillClosesAt,
   resolveBackfillHours,
   resolveBackfillMaxBytes,
@@ -81,7 +81,7 @@ test("the first import accepts old history and a large chunk", async () => {
   assert.equal(rejected.status, 413);
   const error = await rejected.json();
   assert.equal(error.error, "payload_too_large");
-  assert.match(error.message, new RegExp(SHORTER_DATE_RANGE));
+  assert.ok(error.message.includes(shorterDateRange(5_000)));
   assert.equal(error.message.includes(INITIAL_IMPORT_CLOSED), false);
   assert.equal(error.backfill.open, true);
   assert.equal((await storage.queryDaySummary("2020-03-02")).steps, null);
@@ -153,7 +153,7 @@ test("the window closes on time, on the total, and on an explicit done", async (
   assert.equal(blocked.status, 413);
   const blockedBody = await blocked.json();
   assert.match(blockedBody.message, /initial import total/);
-  assert.match(blockedBody.message, new RegExp(SHORTER_DATE_RANGE));
+  assert.ok(blockedBody.message.includes(shorterDateRange(1_500)));
   assert.equal(blockedBody.backfill.open, true);
   assert.equal(budget.backfill.bytes, 700);
   const finish = exactSize("2020-05-03", 1, 1_300);
