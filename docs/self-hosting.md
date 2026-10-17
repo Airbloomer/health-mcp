@@ -23,7 +23,7 @@ printf '%s' 'replace-with-a-long-random-token' | npx wrangler secret put HEALTH_
 npx wrangler deploy
 ```
 
-`node src/cli/d1-migrate.js` runs every pending file in order: `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, `0005_quota_window_bigint.sql`, then `0006_ingest_backfill_deadline.sql`. It skips an `ADD COLUMN` whose name is already on the table, and it records each file in both migration tables. Do not deploy until all six have been applied. `0006` adds the stored deadline and total, and it inserts a closed import-window row when points, workouts, or raw payloads are already stored. A missing row is not an open window.
+`node src/cli/d1-migrate.js` requires `--remote` or `--local`. It runs every pending file in order: `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, `0005_quota_window_bigint.sql`, then `0006_ingest_backfill_deadline.sql`. Each file is one execute, together with the rows that record it, so the file is applied completely or not at all. It skips an `ADD COLUMN` whose name is already on the table, and it records each file in both migration tables. Run the same command again if it stops: a quota table that was copied and not renamed is finished on the next run. Do not deploy until all six have been applied. `0006` adds the stored deadline and total, and it inserts a closed import-window row when points, workouts, or raw payloads are already stored. A missing row is not an open window.
 
 For local development, apply the same migrations before `wrangler dev`:
 

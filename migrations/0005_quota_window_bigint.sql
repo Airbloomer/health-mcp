@@ -1,5 +1,6 @@
 -- `window_start` is epoch milliseconds. Rebuild the table so the value is
--- BIGINT. The earlier definition used INTEGER.
+-- BIGINT. The earlier definition used INTEGER. If a run copies the rows and
+-- stops before the rename, the next run finishes that rename.
 CREATE TABLE IF NOT EXISTS ingest_quota_wide (
   token_key TEXT NOT NULL,
   window_start BIGINT NOT NULL,

@@ -884,6 +884,8 @@ test("the projected statement count matches the statements D1 runs", async () =>
       points,
       charge: false,
       hint: null,
+      storedHint: null,
+      hintKnown: true,
       markOrigin: true,
       prefix: 0,
     });
@@ -894,6 +896,8 @@ test("the projected statement count matches the statements D1 runs", async () =>
     points: charged,
     charge: true,
     hint: null,
+    storedHint: null,
+    hintKnown: true,
     markOrigin: true,
     prefix: 1,
   });
@@ -942,7 +946,7 @@ test("d1 rejects an over-budget apple import before any write", async () => {
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_quota").get().n, 0);
-  assert.equal(counter.n, 2);
+  assert.equal(counter.n, 3);
   db.close();
 });
 
@@ -967,6 +971,8 @@ test("d1 counts nine metrics with the window open", async () => {
     workouts: parsed.workouts,
     charge: false,
     hint: null,
+    storedHint: null,
+    hintKnown: true,
     markOrigin: true,
     prefix: 1,
   });
@@ -1006,12 +1012,14 @@ function sealClosed(db) {
   db.prepare("INSERT INTO export_hint (id, hint) VALUES (1, ?)").run("stored hint");
 }
 
-function closedProjection(points, workouts = []) {
+function closedProjection(points, workouts = [], storedHint = "stored hint") {
   return projectedIngestStatements({
     points,
     workouts,
     charge: false,
     hint: null,
+    storedHint,
+    hintKnown: true,
     markOrigin: true,
     prefix: 1,
   });
@@ -1047,6 +1055,28 @@ test("ingest projections match d1 when a hint is already stored", async () => {
   assert.equal(posted.counter.n, closedProjection(apple.points, apple.workouts));
   assert.equal(posted.db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, apple.points.length);
   posted.db.close();
+
+  const quietDb = new Database(":memory:");
+  applySqliteMigrations(quietDb);
+  quietDb.prepare(
+    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) VALUES (1, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 0, 0, '2026-10-01T00:00:00.000Z', 0)",
+  ).run();
+  const quietCounter = { n: 0 };
+  const quietStorage = new D1Storage(d1FromSqlite(quietDb, quietCounter));
+  const quietBody = steps("2026-10-16", 4);
+  const quiet = await handleRequest(
+    request(JSON.stringify(quietBody)),
+    ctx(quietStorage, { ingestRatePerHour: 0 }),
+  );
+  assert.equal(quiet.status, 200, JSON.stringify(await quiet.clone().json()));
+  const quietParsed = parse(quietBody, { timeZone: "UTC" });
+  const quietPoints = aggregateDays(quietParsed.points, storedMetricSet());
+  const unchanged = closedProjection(quietPoints, quietParsed.workouts, null);
+  const changed = closedProjection(quietPoints, quietParsed.workouts, "stored hint");
+  assert.equal(quietCounter.n, unchanged);
+  assert.equal(changed, unchanged + 1);
+  assert.equal(quietDb.prepare("SELECT COUNT(*) AS n FROM export_hint WHERE id = 1").get().n, 0);
+  quietDb.close();
 });
 
 function applePointCatalog(days, names, start = "2010-01-01") {
@@ -1114,7 +1144,7 @@ test("d1 accepts 45 statements and rejects 46 before writing", async () => {
   const payload = await rejected.response.json();
   assert.match(payload.message, /node src\/cli\/import-apple-health\.js --chunk-url/);
   assert.equal(payload.message.includes("shorter date range"), false);
-  assert.equal(rejected.counter.n, 1);
+  assert.equal(rejected.counter.n, 2);
   assert.equal(rejected.db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, 0);
   assert.equal(rejected.db.prepare("SELECT hint FROM export_hint WHERE id = 1").get().hint, "stored hint");
   rejected.db.close();
