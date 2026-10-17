@@ -173,7 +173,9 @@ export function resolveMaxStatements(value) {
  * lists as `insertIngest`. Each group is two stored-row reads. A charged
  * group adds two more reads and the reservation. Group 0 reads the origin
  * marker and inserts it. When `hint` is passed, group 0 reads the hint and
- * writes it.
+ * writes it only when the stored value would change. Pass `hintKnown` and
+ * `storedHint` for that exact write. Omitting them counts the write, which
+ * is the safe direction.
  * `prefix` is the window read, the stored-data probe, a seal, and a claim
  * when those run. A release is not included: it runs only after a failed write.
  */
@@ -183,6 +185,8 @@ export function projectedIngestStatements({
   charge = false,
   raw = false,
   hint,
+  storedHint = null,
+  hintKnown = false,
   markOrigin = false,
   prefix = 0,
 } = {}) {
@@ -201,10 +205,17 @@ export function projectedIngestStatements({
     const chunks = ingestWriteChunks(diff.points, diff.workouts);
     let count = 2;
     if (charge) count += 3;
+    // The insert is counted even when that marker is already stored. A JSON
+    // request on an open window then runs one statement fewer than this
+    // projection. The extra count is the safe direction: the request is
+    // rejected before it can pass D1's limit.
     if (index === 0 && markOrigin) count += 2;
     if (index === 0 && raw) count += 1;
     count += chunks.replacePoints.length + chunks.guardPoints.length + chunks.insertOnly.length + chunks.upserts.length;
-    if (index === 0 && hint !== undefined) count += 2;
+    if (index === 0 && hint !== undefined) {
+      count += 1;
+      if (!hintKnown || hintAction(storedHint, hint) !== "skip") count += 1;
+    }
     total += count;
   }
   return total;

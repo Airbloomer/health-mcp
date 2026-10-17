@@ -54,7 +54,7 @@ Then create the database tables. Do this **before** you deploy:
 node src/cli/d1-migrate.js --remote
 ```
 
-✅ **Checkpoint:** the command prints `0001_init.sql` through `0006_ingest_backfill_deadline.sql`, with no error.
+✅ **Checkpoint:** the command prints `0001_init.sql` through `0006_ingest_backfill_deadline.sql`, with no error. `--remote` or `--local` is required.
 
 Prefer your own machine, a VPS, or Docker? See [Self-hosting](https://github.com/Airbloomer/health-mcp/blob/main/docs/self-hosting.md) for the Node.js and Docker options (SQLite or Postgres).
 
@@ -203,7 +203,7 @@ The window closes for good at the first of these: the deadline stored when it op
 ## Troubleshooting
 
 - **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on three `POST` routes: the two Android webhook routes (`/ingest/hc-webhook`, `/ingest/life-dashboard`) and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
-- **Sending data fails right after deploying.** Run `node src/cli/d1-migrate.js --remote`, then `npx wrangler deploy` again.
+- **Sending data fails right after deploying.** Run `node src/cli/d1-migrate.js --remote` (or `--local` for a local database), then `npx wrangler deploy` again.
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 - **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
