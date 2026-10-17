@@ -73,8 +73,24 @@ export const INSERT_WORKOUTS_JSON =
   "FROM json_each(?) WHERE true " +
   "ON CONFLICT(name, start) DO NOTHING";
 
+/**
+ * Non-Apple ingest data counts as already stored. Apple rows alone do not:
+ * an Apple import must not seal the window for a later ingest.
+ * id 2 is set when a non-Apple ingest stores rows. id 3 is set by Apple.
+ */
+export const INGEST_MARKER_ID = 2;
+export const APPLE_MARKER_ID = 3;
+
+export const READ_MARKER = "SELECT 1 AS ok FROM export_hint WHERE id = ?";
+
+export const MARK_ORIGIN =
+  "INSERT INTO export_hint (id, hint) VALUES (?, '1') ON CONFLICT(id) DO NOTHING";
+
 export const HAS_STORED_DATA =
-  "SELECT 1 AS ok FROM points_daily UNION ALL SELECT 1 FROM workouts UNION ALL SELECT 1 FROM raw_payloads LIMIT 1";
+  "SELECT 1 AS ok FROM export_hint WHERE id = 2 " +
+  "UNION ALL SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM export_hint WHERE id = 3) " +
+  "AND (EXISTS (SELECT 1 FROM points_daily) OR EXISTS (SELECT 1 FROM workouts) OR EXISTS (SELECT 1 FROM raw_payloads)) " +
+  "LIMIT 1";
 
 export const WORKOUTS_FOR_DATE =
   "SELECT name, start, date, duration_min, kcal FROM workouts WHERE date = ? ORDER BY start";

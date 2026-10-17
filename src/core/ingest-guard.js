@@ -1,3 +1,4 @@
+import { ingestWriteChunks } from "./bulk.js";
 import { localDate } from "./parse.js";
 import { MAX_PAYLOAD_CHARS } from "./metrics.js";
 
@@ -61,14 +62,19 @@ export const DEFAULT_INGEST_BACKFILL_HOURS = 72;
 export const MAX_INGEST_BACKFILL_HOURS = 24 * 366;
 
 /**
- * Statements one request may run. The default leaves headroom under a
- * 50-statement request cap. The projected count includes each group's
- * reads, reservation, release, and writes, and it is checked before any write.
+ * D1 allows 50 statements in one request. 45 counts the statements a
+ * successful request runs and leaves room for a release if a write fails.
+ * Configuration can only lower this. SQLite, Postgres, and memory have no budget.
  */
-export const DEFAULT_INGEST_MAX_STATEMENTS = 40;
+export const D1_STATEMENT_BUDGET = 45;
 
-/** Upper bound for a malformed statement budget. */
-export const MAX_INGEST_MAX_STATEMENTS = 10_000;
+export const DEFAULT_INGEST_MAX_STATEMENTS = D1_STATEMENT_BUDGET;
+
+/** Lock timeout (55P03) and statement timeout (57014) can be retried. */
+export function retryableDatabaseError(error) {
+  const code = error?.code;
+  return code === "55P03" || code === "57014";
+}
 
 export const INITIAL_IMPORT_CLOSED = "The initial import window is closed.";
 
@@ -151,18 +157,55 @@ export function resolveBackfillHours(value) {
   return resolveAtLeastOne(value, DEFAULT_INGEST_BACKFILL_HOURS, MAX_INGEST_BACKFILL_HOURS);
 }
 
+/** A missing or invalid value uses the D1 ceiling. A larger value cannot raise it. */
 export function resolveMaxStatements(value) {
-  return resolveAtLeastOne(value, DEFAULT_INGEST_MAX_STATEMENTS, MAX_INGEST_MAX_STATEMENTS);
+  const parsed = configuredInteger(value);
+  if (parsed == null || parsed < 1) return D1_STATEMENT_BUDGET;
+  return Math.min(parsed, D1_STATEMENT_BUDGET);
 }
 
 /**
- * Whole-request statement projection.
- * Each group counts two indexed reads, one reservation, and one release,
- * plus a point write and a workout write when that group has those rows.
- * `prefix` is the request overhead (window read, stored-data probe, and claim).
+ * Statements D1 runs for this batch on an empty store, using the same chunk
+ * lists as `insertIngest`. Each group is two stored-row reads. A charged
+ * group adds two more reads and the reservation. Group 0 reads the origin
+ * marker and inserts it, and reads the hint when `hint` is not undefined.
+ * `prefix` is the window read, the stored-data probe, a seal, and a claim
+ * when those run. A release is not included: it runs only after a failed write.
  */
-export function projectedIngestStatements({ groups = 0, pointGroups = 0, workoutGroups = 0, raw = 0, hint = 0, prefix = 0 } = {}) {
-  return prefix + groups * 4 + pointGroups + workoutGroups + raw + hint;
+export function projectedIngestStatements({
+  points = [],
+  workouts = [],
+  charge = false,
+  raw = false,
+  hint,
+  markOrigin = false,
+  prefix = 0,
+} = {}) {
+  const dates = [...new Set([
+    ...(points || []).map((point) => point.date),
+    ...(workouts || []).map((workout) => workout.date),
+  ])].filter((date) => date != null && date !== "");
+  const groups = dateGroups(dates, MAX_INGEST_DATES);
+  if (groups.length === 0) return prefix;
+  let total = prefix;
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = new Set(groups[index]);
+    const groupPoints = (points || []).filter((point) => group.has(point.date));
+    const groupWorkouts = (workouts || []).filter((workout) => group.has(workout.date));
+    const diff = partitionIngest(groupPoints, groupWorkouts, { points: [], workouts: [] });
+    const chunks = ingestWriteChunks(diff.points, diff.workouts);
+    let count = 2;
+    if (charge) count += 3;
+    if (index === 0 && markOrigin) count += 2;
+    if (index === 0 && raw) count += 1;
+    count += chunks.replacePoints.length + chunks.guardPoints.length + chunks.insertOnly.length + chunks.upserts.length;
+    if (index === 0 && hint !== undefined) {
+      count += 1;
+      if (hintAction(null, hint) !== "skip") count += 1;
+    }
+    total += count;
+  }
+  return total;
 }
 
 /** Split `total` bytes across `count` groups. The shares add up to `total`. */
@@ -350,7 +393,13 @@ export function tooManyDatesBody(maxBytes) {
   };
 }
 
-export function tooManyStatementsBody(maxBytes) {
+export function tooManyStatementsBody(maxBytes, { apple = false } = {}) {
+  if (apple) {
+    return {
+      error: "payload_too_large",
+      message: "This export has too many days for one request. Export a shorter date range.",
+    };
+  }
   return {
     error: "payload_too_large",
     message: `This request would use too many statements. Split the import with POST /import/apple-health/chunk. ${chunkHint(maxBytes)}`,

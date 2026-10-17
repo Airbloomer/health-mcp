@@ -1,16 +1,21 @@
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
-import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, resolveMaxStatements, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { ingestWriteChunks } from "./bulk.js";
+import { migrationFiles } from "./migrate.js";
 import {
   D1_BATCH_LIMIT,
   CLOSE_BACKFILL,
   DELETE_EMPTY_BACKFILL,
   DELETE_HINT,
   FINISH_BACKFILL,
+  APPLE_MARKER_ID,
   HAS_STORED_DATA,
+  INGEST_MARKER_ID,
   INSERT_RAW,
+  MARK_ORIGIN,
+  READ_MARKER,
   INSERT_WORKOUTS_JSON,
   LIST_METRICS,
   METRIC_RANGE,
@@ -23,6 +28,7 @@ import {
   RESERVE_BACKFILL,
   SEAL_BACKFILL_IF_MISSING,
   CLAIM_QUOTA,
+  splitStatements,
   UPSERT_HINT,
   UPSERT_POINTS_JSON,
   UPSERT_WORKOUTS_JSON,
@@ -44,6 +50,11 @@ import {
 export class D1Storage {
   constructor(db) {
     this.db = db;
+  }
+
+  /** D1 is the only adapter with a statement budget. The ceiling is 45. */
+  statementLimit(configured) {
+    return resolveMaxStatements(configured);
   }
 
   async run(op) {
@@ -171,26 +182,20 @@ export class D1Storage {
     const stored = await this.loadStored(dates);
     const diff = partitionIngest(batch.points, batch.workouts, stored);
     const newDays = countNewDays(batch.points, batch.workouts, stored);
+    const chunks = ingestWriteChunks(diff.points, diff.workouts);
     const statements = [];
+    if (options.markOrigin) {
+      const markerId = options.markOrigin === "apple" ? APPLE_MARKER_ID : INGEST_MARKER_ID;
+      const existing = await this.rowsFor(READ_MARKER, markerId);
+      if (!existing.length) statements.push(this.db.prepare(MARK_ORIGIN).bind(markerId));
+    }
     if (shouldStoreRaw(batch)) {
       statements.push(this.db.prepare(INSERT_RAW).bind(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload));
     }
-    const replacePoints = diff.points.filter((point) => point.replace);
-    const guardPoints = diff.points.filter((point) => !point.replace);
-    for (const chunk of jsonChunks(replacePoints.map(pointJson))) {
-      statements.push(this.db.prepare(REPLACE_POINTS_JSON).bind(chunk));
-    }
-    for (const chunk of jsonChunks(guardPoints.map(pointJson))) {
-      statements.push(this.db.prepare(UPSERT_POINTS_JSON).bind(chunk));
-    }
-    const insertOnly = diff.workouts.filter((workout) => workout.insertOnly);
-    const upserts = diff.workouts.filter((workout) => !workout.insertOnly);
-    for (const chunk of jsonChunks(insertOnly.map(workoutJson))) {
-      statements.push(this.db.prepare(INSERT_WORKOUTS_JSON).bind(chunk));
-    }
-    for (const chunk of jsonChunks(upserts.map(workoutJson))) {
-      statements.push(this.db.prepare(UPSERT_WORKOUTS_JSON).bind(chunk));
-    }
+    for (const chunk of chunks.replacePoints) statements.push(this.db.prepare(REPLACE_POINTS_JSON).bind(chunk));
+    for (const chunk of chunks.guardPoints) statements.push(this.db.prepare(UPSERT_POINTS_JSON).bind(chunk));
+    for (const chunk of chunks.insertOnly) statements.push(this.db.prepare(INSERT_WORKOUTS_JSON).bind(chunk));
+    for (const chunk of chunks.upserts) statements.push(this.db.prepare(UPSERT_WORKOUTS_JSON).bind(chunk));
     const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
     if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());
     if (action === "set") statements.push(this.db.prepare(UPSERT_HINT).bind(options.hint));
@@ -221,5 +226,34 @@ export class D1Storage {
   async listWorkouts(startDate, endDate) {
     const result = await this.run(() => this.db.prepare(WORKOUTS_RANGE).bind(startDate, endDate).all());
     return result.results || [];
+  }
+}
+
+/**
+ * Apply migrations through a D1 binding. An ADD COLUMN whose name is already
+ * on the table is skipped, so a database that applied an earlier copy of
+ * 0004 can apply 0006.
+ */
+export async function applyD1Migrations(db) {
+  await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"),
+  ]);
+  const existing = await db.prepare("SELECT id FROM schema_migrations").all();
+  const applied = new Set((existing?.results || []).map((row) => row.id));
+  for (const file of migrationFiles()) {
+    if (applied.has(file.id)) continue;
+    const statements = [];
+    for (const statement of splitStatements(file.sql)) {
+      const body = statement.replace(/--[^\n]*/g, "").trim();
+      const alter = body.match(/^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
+      if (alter) {
+        const info = await db.prepare(`PRAGMA table_info(${alter[1]})`).all();
+        const columns = info?.results || [];
+        if (columns.some((column) => String(column.name).toLowerCase() === alter[2].toLowerCase())) continue;
+      }
+      statements.push(db.prepare(statement));
+    }
+    statements.push(db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").bind(file.id, new Date().toISOString()));
+    if (statements.length) await db.batch(statements);
   }
 }

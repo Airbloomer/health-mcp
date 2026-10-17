@@ -301,20 +301,61 @@ test("postgres sets local timeouts on the reserving connection", async () => {
     async end() {},
   };
   const storage = createPostgresStorageFromPool(pool);
-  await storage.reserveIngestBackfill({
-    openedAt: "2026-10-16T12:30:00.000Z",
-    closeAt: null,
-    addBytes: 1,
-    totalBytes: 10,
-    deadline: "2026-10-19T12:30:00.000Z",
-    nowIso: "2026-10-16T12:30:00.000Z",
-    points: [],
-    workouts: [],
-  });
-  queries.length = 0;
   await storage.withIngestTransaction(async () => {});
   assert.equal(queries.includes("SET LOCAL lock_timeout = '4s'"), true);
   assert.equal(queries.includes("SET LOCAL statement_timeout = '8s'"), true);
   assert.equal(queries[0], "BEGIN");
   assert.equal(queries.at(-1), "COMMIT");
+});
+
+test("a failed rollback discards the postgres client", async () => {
+  let discarded = null;
+  const client = {
+    async query(sql) {
+      if (sql === "ROLLBACK") throw new Error("rollback failed");
+      return { rows: [] };
+    },
+    release(error) {
+      discarded = error || null;
+    },
+  };
+  const storage = createPostgresStorageFromPool({
+    async query() {
+      return { rows: [] };
+    },
+    async connect() {
+      return client;
+    },
+    async end() {},
+  });
+  await assert.rejects(() => storage.withIngestTransaction(async () => {
+    throw new Error("write failed");
+  }), /write failed/);
+  assert.equal(discarded?.message, "rollback failed");
+});
+
+test("a lock timeout is returned with retry-after", async () => {
+  const { MemoryStorage } = await import("../src/core/memory.js");
+  const storage = new MemoryStorage();
+  storage.insertIngest = async () => {
+    const error = new Error("canceling statement due to statement timeout");
+    error.code = "57014";
+    throw error;
+  };
+  const server = await startServer({ storage, token: "tok", port: 0, ingestRatePerHour: 0 });
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/ingest`, {
+      method: "POST",
+      headers: { authorization: "Bearer tok", "content-type": "application/json" },
+      body: JSON.stringify({
+        data: { metrics: [{ name: "step_count", units: "count", data: [{ date: "2026-10-16 09:00:00 +0000", qty: 1 }] }] },
+      }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("retry-after"), "8");
+    assert.deepEqual(await response.json(), { error: "unavailable" });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

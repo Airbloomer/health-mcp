@@ -1,6 +1,7 @@
 import { activeUrlToken } from "../core/auth.js";
 import { dailyLimitResponse } from "../core/free-tier.js";
 import { handleRequest } from "../core/http.js";
+import { retryableDatabaseError } from "../core/ingest-guard.js";
 import { D1Storage } from "./d1.js";
 
 /** Map Worker bindings onto the platform-free request context. */
@@ -33,6 +34,16 @@ export default {
       return await handleRequest(request, contextFromEnv(env));
     } catch (error) {
       if (error?.code === "D1_DAILY_LIMIT") return dailyLimitResponse(error.limit);
+      if (retryableDatabaseError(error)) {
+        return new Response(JSON.stringify({ error: "unavailable" }), {
+          status: 503,
+          headers: {
+            "content-type": "application/json",
+            "cache-control": "no-store",
+            "retry-after": "8",
+          },
+        });
+      }
       throw error;
     }
   },

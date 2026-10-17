@@ -31,6 +31,8 @@ export class MemoryStorage {
     this.exportHint = null;
     this.backfill = null;
     this.backfillLock = Promise.resolve();
+    this.appleData = false;
+    this.ingestData = false;
   }
 
   async withBackfillLock(fn) {
@@ -52,6 +54,8 @@ export class MemoryStorage {
   }
 
   hasStoredData() {
+    if (this.ingestData) return true;
+    if (this.appleData) return false;
     return this.points.size > 0 || this.workouts.size > 0 || this.payloads.length > 0;
   }
 
@@ -189,6 +193,8 @@ export class MemoryStorage {
   }
 
   async insertIngest(batch, options = {}) {
+    if (options.markOrigin === "apple") this.appleData = true;
+    if (options.markOrigin === "ingest") this.ingestData = true;
     if (shouldStoreRaw(batch)) {
       this.payloads.push({
         id: batch.id,

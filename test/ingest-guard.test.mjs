@@ -511,7 +511,7 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
   const quiet = ctx(envStorage, { ingestRatePerHour: 0 });
   const first = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(steps("2026-10-16", 20)) }), quiet);
   assert.equal((await first.json()).written, 1);
-  assert.equal(writes.n, 1);
+  assert.equal(writes.n, 2);
   const before = writes.n;
   const repeat = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(steps("2026-10-16", 20)) }), quiet);
   const repeatBody = await repeat.json();

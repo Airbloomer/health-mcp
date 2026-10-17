@@ -113,10 +113,7 @@ test("postgres rolls back a reservation when the write fails", { skip: url ? fal
     await storage.migrate();
     await pool.query("DELETE FROM ingest_backfill");
     await pool.query("DELETE FROM points_daily");
-    storage.insertIngest = async () => {
-      throw new Error("write failed");
-    };
-    await assert.rejects(() => storage.reserveIngestBackfill({
+    await assert.rejects(() => storage.withIngestTransaction((client) => storage.reserveIngestBackfill({
       openedAt: NOW.toISOString(),
       closeAt: NOW.toISOString(),
       addBytes: 80,
@@ -125,8 +122,11 @@ test("postgres rolls back a reservation when the write fails", { skip: url ? fal
       nowIso: NOW.toISOString(),
       points: [],
       workouts: [],
-      write: () => storage.insertIngest({}),
-    }), /write failed/);
+      client,
+      write: async () => {
+        throw new Error("write failed");
+      },
+    })), /write failed/);
     const row = await pool.query("SELECT COUNT(*)::int AS n FROM ingest_backfill");
     assert.equal(row.rows[0].n, 0);
   } finally {
@@ -187,7 +187,7 @@ test("postgres finishes concurrent posts above the pool size", { skip: url ? fal
   await burst(3, 6);
 });
 
-test("postgres rolls back every group when a later group fails", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
+test("an apple chunk failure on postgres keeps earlier groups", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
   const pool = new pg.Pool({ connectionString: url, max: 4 });
   const storage = createPostgresStorageFromPool(pool);
   try {
@@ -244,7 +244,8 @@ test("postgres rolls back every group when a later group fails", { skip: url ? f
       }), /injected/);
       const pointsLeft = await pool.query("SELECT COUNT(*)::int AS n FROM points_daily");
       const row = await pool.query("SELECT bytes FROM ingest_backfill");
-      assert.equal(pointsLeft.rows[0].n, 1, `group ${failAt}`);
+      const keptGroups = failAt - 1;
+      assert.equal(pointsLeft.rows[0].n, 1 + 366 * keptGroups, `group ${failAt}`);
       assert.equal(Number(row.rows[0].bytes), Number(before.rows[0].bytes), `group ${failAt}`);
       seen = 0;
     }
