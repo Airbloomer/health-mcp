@@ -10,7 +10,7 @@ health-mcp takes the steps, calories, weight, body fat, workouts and nutrition y
 
 Not medical advice. See [Disclaimer](#disclaimer).
 
-[Quick start](#quick-start) · [Troubleshooting](#troubleshooting) · [Hosted version](#hosted-version)
+[Quick start](#quick-start) · [Troubleshooting](#troubleshooting)
 
 ## How it works
 
@@ -227,10 +227,6 @@ health-mcp is self-hosted software. You run it and you control your data, and yo
 Any third-party apps mentioned in this project's docs are owned by their respective owners and are not affiliated with or endorsed by Airbloomer, LLC. Use them under their own terms and privacy policies.
 
 Provided under the license in LICENSE, "as is", without warranty of any kind.
-
-## Hosted version
-
-We're exploring a hosted health-mcp for people who don't want to run their own server. It isn't available, and there's no commitment to launch it, or to any pricing or timing. To hear if it happens, email oss@airbloomer.com with the subject 'hosted waitlist'. Please don't include any health information in your email. We'll use your email address only to contact you about a hosted version, keep it no longer than 24 months, and delete it sooner if you ask (reply 'remove' at any time). Details: https://airbloomer.com/privacy. Nothing in this section changes the self-hosted software: Airbloomer, LLC still does not host, receive or access any of your health data.
 
 ## License
 
