@@ -11,6 +11,7 @@ import { summarizeDay } from "../src/core/summary.js";
 import { expectedSummary, summaryDate } from "./expected.mjs";
 
 const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
+const fixtureIngest = { ingestMaxAgeDays: 36500, ingestRatePerHour: 0, ingestMaxBodyBytes: 5_000_000 };
 
 function request(pathname, { method = "GET", token = "tok", body } = {}) {
   const headers = new Headers();
@@ -109,7 +110,7 @@ test("daily rows summarize to the same object as the raw samples", () => {
 
 test("memory storage serves the ingest and summary API", async () => {
   const storage = new MemoryStorage();
-  const ctx = { token: "tok", timeZone: "UTC", storage, now: new Date("2026-10-16T12:00:00Z") };
+  const ctx = { token: "tok", timeZone: "UTC", storage, now: new Date("2026-10-16T12:00:00Z"), ...fixtureIngest };
 
   const denied = await handleRequest(request("/summary?date=2026-10-14", { token: "" }), ctx);
   assert.equal(denied.status, 401);
@@ -196,6 +197,7 @@ test("HEALTH_STORE_RAW defaults to off", async () => {
     token: "tok",
     storage: off,
     now: new Date("2026-10-16T12:00:00Z"),
+    ...fixtureIngest,
   });
   assert.equal(skipped.status, 200);
   assert.equal(off.payloads.length, 0);
@@ -207,6 +209,7 @@ test("HEALTH_STORE_RAW defaults to off", async () => {
     storage: on,
     storeRaw: "true",
     now: new Date("2026-10-16T12:00:00Z"),
+    ...fixtureIngest,
   });
   assert.equal(stored.status, 200);
   assert.equal(on.payloads.length, 1);
@@ -223,7 +226,7 @@ test("allowlist stores extra metrics and raw storage can be turned off", async (
       ],
     },
   };
-  const ctx = { token: "tok", storage, storeRaw: "false", metricAllowlist: "heart_rate" };
+  const ctx = { token: "tok", storage, storeRaw: "false", metricAllowlist: "heart_rate", now: new Date("2026-10-16T12:00:00Z"), ...fixtureIngest };
   const ingested = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(body) }), ctx);
   assert.equal((await ingested.json()).points, 2);
   assert.equal(storage.payloads.length, 0);
@@ -236,7 +239,7 @@ test("allowlist stores extra metrics and raw storage can be turned off", async (
 
 test("a partial re-send leaves the full-day total unchanged", async () => {
   const storage = new MemoryStorage();
-  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z") };
+  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z"), ...fixtureIngest };
   const full = {
     data: {
       metrics: [
@@ -299,7 +302,7 @@ test("malformed ingest bodies return 400", async () => {
 
 test("a raw payload over 1.5MB is not stored", async () => {
   const storage = new MemoryStorage();
-  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z") };
+  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z"), ...fixtureIngest };
   const body = {
     data: {
       metrics: [

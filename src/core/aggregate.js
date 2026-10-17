@@ -48,8 +48,8 @@ export function shouldStoreRaw(batch) {
  *
  * Storage replaces an existing (metric, date) row only when this row's `n`
  * is at least the stored `n`. A shorter re-send leaves the fuller day in
- * place. Sending the same whole day again (`n` unchanged) overwrites with
- * the same totals.
+ * place. Sending the same whole day again (`n` unchanged) keeps the same
+ * totals, and storage skips the write when those values already match.
  */
 export function aggregateDays(points, allow = storedMetricSet()) {
   const byTimestamp = new Map();

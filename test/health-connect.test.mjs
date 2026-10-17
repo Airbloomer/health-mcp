@@ -18,7 +18,7 @@ function request(pathname, { method = "POST", token = "tok", body, headers = {} 
 }
 
 function ctx(storage = new MemoryStorage(), extra = {}) {
-  return { token: "tok", timeZone: "UTC", storage, now: new Date("2026-10-16T12:00:00Z"), ...extra };
+  return { token: "tok", timeZone: "UTC", storage, now: new Date("2026-10-16T12:00:00Z"), ingestMaxAgeDays: 36500, ingestRatePerHour: 0, ...extra };
 }
 
 function hcBody(steps = [4000, 5321]) {

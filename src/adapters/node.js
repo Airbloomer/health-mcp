@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { activeUrlToken, redactRequestTarget } from "../core/auth.js";
 import { handleRequest } from "../core/http.js";
+import { payloadTooLargeBody, resolveMaxBodyBytes } from "../core/ingest-guard.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
 import { openPostgres } from "./postgres.js";
@@ -40,8 +41,12 @@ function requestPath(req) {
   return (req.url || "").split("?")[0];
 }
 
-function bodyLimit(req) {
-  return requestPath(req) === "/mcp" ? MAX_MCP_BYTES : MAX_PAYLOAD_CHARS;
+function bodyLimit(req, ingestMaxBodyBytes) {
+  if (requestPath(req) === "/mcp") return MAX_MCP_BYTES;
+  if (requestPath(req) === "/import/apple-health/chunk") return MAX_PAYLOAD_CHARS;
+  const type = String(req.headers["content-type"] || "");
+  if (type.includes("json")) return resolveMaxBodyBytes(ingestMaxBodyBytes);
+  return MAX_PAYLOAD_CHARS;
 }
 
 function declaredByteLength(req) {
@@ -52,23 +57,22 @@ function declaredByteLength(req) {
   return Number(value);
 }
 
-async function readBody(req) {
+function tooLargeError(req, limit) {
+  const error = new Error("payload_too_large");
+  error.code = "PAYLOAD_TOO_LARGE";
+  error.detail = requestPath(req) === "/mcp" ? { error: "payload_too_large" } : payloadTooLargeBody(limit);
+  return error;
+}
+
+async function readBody(req, ingestMaxBodyBytes) {
   const chunks = [];
   let size = 0;
-  const limit = bodyLimit(req);
+  const limit = bodyLimit(req, ingestMaxBodyBytes);
   const declared = declaredByteLength(req);
-  if (requestPath(req) === "/mcp" && declared != null && declared > limit) {
-    const error = new Error("payload_too_large");
-    error.code = "PAYLOAD_TOO_LARGE";
-    throw error;
-  }
+  if (declared != null && declared > limit) throw tooLargeError(req, limit);
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) {
-      const error = new Error("payload_too_large");
-      error.code = "PAYLOAD_TOO_LARGE";
-      throw error;
-    }
+    if (size > limit) throw tooLargeError(req, limit);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
@@ -95,7 +99,7 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, now, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
       let request;
@@ -108,10 +112,24 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         }
         request = toWebRequest(req, Readable.toWeb(req));
       } else {
-        const body = await readBody(req);
+        const body = await readBody(req, ingestMaxBodyBytes);
         request = toWebRequest(req, body);
       }
-      const response = await handleRequest(request, { storage, token, urlToken, timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins });
+      const response = await handleRequest(request, {
+        storage,
+        token,
+        urlToken,
+        timeZone,
+        storeRaw,
+        metricAllowlist,
+        sourcePriority,
+        shortcutsSourcePriority,
+        mcpAllowedOrigins,
+        ingestMaxAgeDays,
+        ingestMaxBodyBytes,
+        ingestRatePerHour,
+        now,
+      });
       const payload = Buffer.from(await response.arrayBuffer());
       const headers = { "content-length": payload.length };
       response.headers.forEach((value, key) => {
@@ -121,7 +139,7 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
       res.end(payload);
     } catch (error) {
       if (error?.code === "PAYLOAD_TOO_LARGE") {
-        writeJson(res, 413, { error: "payload_too_large" });
+        writeJson(res, 413, error.detail || { error: "payload_too_large" });
         req.destroy();
         return;
       }
@@ -162,6 +180,9 @@ if (isMainModule()) {
     sourcePriority: process.env.HEALTH_SOURCE_PRIORITY,
     shortcutsSourcePriority: process.env.HEALTH_SHORTCUTS_SOURCE_PRIORITY,
     mcpAllowedOrigins: process.env.MCP_ALLOWED_ORIGINS,
+    ingestMaxAgeDays: process.env.INGEST_MAX_AGE_DAYS,
+    ingestMaxBodyBytes: process.env.INGEST_MAX_BODY_BYTES,
+    ingestRatePerHour: process.env.INGEST_RATE_LIMIT_PER_HOUR,
     port,
     host,
   });

@@ -1,4 +1,5 @@
 import { shouldStoreRaw } from "./aggregate.js";
+import { hintAction, partitionIngest, withExportHint } from "./ingest-guard.js";
 import { summarizeDay } from "./summary.js";
 
 /**
@@ -12,6 +13,7 @@ import { summarizeDay } from "./summary.js";
  *
  * `points` are already one row per (metric, date). A later insert replaces
  * that row only when its `n` is greater than or equal to the stored `n`.
+ * A row whose stored values already match is left unwritten.
  * Workouts stay one row per (name, start). Raw bodies are stored only when
  * `shouldStoreRaw` allows it.
  */
@@ -20,9 +22,26 @@ export class MemoryStorage {
     this.payloads = [];
     this.points = new Map();
     this.workouts = new Map();
+    this.quota = new Map();
+    this.exportHint = null;
   }
 
-  async insertIngest(batch) {
+  async readIngestQuota(tokenKey, windowStart) {
+    return this.quota.get(`${tokenKey}\0${windowStart}`) ?? 0;
+  }
+
+  async readExportHint() {
+    return this.exportHint;
+  }
+
+  async setExportHint(hint) {
+    const action = hintAction(this.exportHint, hint);
+    if (action === "skip") return false;
+    this.exportHint = action === "clear" ? null : hint;
+    return true;
+  }
+
+  async insertIngest(batch, options = {}) {
     if (shouldStoreRaw(batch)) {
       this.payloads.push({
         id: batch.id,
@@ -32,25 +51,32 @@ export class MemoryStorage {
         payload: batch.payload,
       });
     }
-    for (const point of batch.points) {
-      const key = `${point.date}\0${point.metric}`;
-      const prev = this.points.get(key);
-      if (prev && !point.replace && !(point.n >= prev.n)) continue;
+    const diff = partitionIngest(batch.points, batch.workouts, {
+      points: [...this.points.values()],
+      workouts: [...this.workouts.values()],
+    });
+    for (const point of diff.points) {
       const { replace, ...stored } = point;
-      this.points.set(key, stored);
+      this.points.set(`${point.date}\0${point.metric}`, stored);
     }
-    for (const workout of batch.workouts) {
-      const key = `${workout.name}\0${workout.start}`;
-      if (workout.insertOnly && this.workouts.has(key)) continue;
+    for (const workout of diff.workouts) {
       const { insertOnly, ...stored } = workout;
-      this.workouts.set(key, stored);
+      this.workouts.set(`${workout.name}\0${workout.start}`, stored);
     }
+    if (options.quota) {
+      const key = `${options.quota.tokenKey}\0${options.quota.windowStart}`;
+      this.quota.set(key, (this.quota.get(key) ?? 0) + 1);
+    }
+    const action = hintAction(this.exportHint, options.hint);
+    if (action === "clear") this.exportHint = null;
+    if (action === "set") this.exportHint = options.hint;
+    return { written: diff.written, unchanged: diff.unchanged };
   }
 
   async queryDaySummary(date) {
     const points = [...this.points.values()].filter((point) => point.date === date);
     const workouts = [...this.workouts.values()].filter((workout) => workout.date === date);
-    return summarizeDay(date, points, workouts);
+    return withExportHint(summarizeDay(date, points, workouts), this.exportHint);
   }
 
   async queryMetricRange(metric, startDate, endDate) {

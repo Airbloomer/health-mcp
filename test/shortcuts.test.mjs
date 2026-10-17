@@ -17,7 +17,7 @@ function request(pathname, { method = "POST", token = "tok", body } = {}) {
 }
 
 function ctx(storage = new MemoryStorage(), extra = {}) {
-  return { token: "tok", timeZone: "UTC", storage, now: NOW, ...extra };
+  return { token: "tok", timeZone: "UTC", storage, now: NOW, ingestMaxAgeDays: 36500, ingestRatePerHour: 0, ...extra };
 }
 
 // Synthetic values only.

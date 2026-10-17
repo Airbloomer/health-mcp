@@ -30,7 +30,7 @@ const READ_ONLY = {
 export const MCP_TOOLS = [
   {
     name: "get_daily_summary",
-    description: "Daily summary for one calendar day of data exported from Apple Health: dietary and active calories, macros, steps, weight, body fat, and workouts. Same object as GET /summary.",
+    description: "Daily summary for one calendar day of data exported from Apple Health: dietary and active calories, macros, steps, weight, body fat, and workouts. Same object as GET /summary. Includes export_hint when a recent phone export looks misconfigured.",
     inputSchema: {
       type: "object",
       properties: {

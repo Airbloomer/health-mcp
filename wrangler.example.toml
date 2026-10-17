@@ -26,6 +26,12 @@ HEALTH_TIMEZONE = "America/Los_Angeles"
 # HEALTH_METRIC_ALLOWLIST = "heart_rate,resting_heart_rate"
 # Comma-separated Origin values allowed to call /mcp. Empty rejects every request that sends Origin.
 # MCP_ALLOWED_ORIGINS = "https://example.com"
+# Health Auto Export on POST /ingest keeps today and yesterday. Older points are dropped.
+# INGEST_MAX_AGE_DAYS = "1"
+# JSON ingest body limit in bytes. A larger body returns 413.
+# INGEST_MAX_BODY_BYTES = "1000000"
+# Accepted ingest posts per token per UTC hour. 0 disables the limit.
+# INGEST_RATE_LIMIT_PER_HOUR = "6"
 
 [[d1_databases]]
 binding = "DB"

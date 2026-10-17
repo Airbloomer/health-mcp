@@ -15,6 +15,10 @@ export default {
         sourcePriority: env?.HEALTH_SOURCE_PRIORITY,
         shortcutsSourcePriority: env?.HEALTH_SHORTCUTS_SOURCE_PRIORITY,
         mcpAllowedOrigins: env?.MCP_ALLOWED_ORIGINS,
+        ingestMaxAgeDays: env?.INGEST_MAX_AGE_DAYS,
+        ingestMaxBodyBytes: env?.INGEST_MAX_BODY_BYTES,
+        ingestRatePerHour: env?.INGEST_RATE_LIMIT_PER_HOUR,
+        now: env?.now instanceof Date ? env.now : undefined,
         storage: new D1Storage(env?.DB),
       });
     } catch (error) {

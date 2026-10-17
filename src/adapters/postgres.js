@@ -1,15 +1,21 @@
 import pg from "pg";
 import { shouldStoreRaw } from "../core/aggregate.js";
+import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
 import {
+  DELETE_HINT,
   INSERT_RAW,
   LIST_METRICS,
   METRIC_RANGE,
   POINTS_FOR_DATE,
+  READ_HINT,
+  READ_QUOTA,
   splitStatements,
   toPostgres,
+  UPSERT_HINT,
   UPSERT_POINT,
+  UPSERT_QUOTA,
   REPLACE_POINT,
   INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
@@ -50,14 +56,43 @@ export function createPostgresStorageFromPool(pool) {
         }
       }
     },
-    async insertIngest(batch) {
+    async readIngestQuota(tokenKey, windowStart) {
+      const result = await pool.query(toPostgres(READ_QUOTA), [tokenKey, windowStart]);
+      return Number(result.rows[0]?.hits ?? 0);
+    },
+    async readExportHint() {
+      const result = await pool.query(toPostgres(READ_HINT));
+      return result.rows[0]?.hint ?? null;
+    },
+    async setExportHint(hint) {
+      const action = hintAction(await this.readExportHint(), hint);
+      if (action === "skip") return false;
+      if (action === "clear") await pool.query(toPostgres(DELETE_HINT));
+      else await pool.query(toPostgres(UPSERT_HINT), [hint]);
+      return true;
+    },
+    async insertIngest(batch, options = {}) {
+      const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
+      const stored = { points: [], workouts: [] };
+      for (const date of dates) {
+        const points = await pool.query(toPostgres(POINTS_FOR_DATE), [date]);
+        const workouts = await pool.query(toPostgres(WORKOUTS_FOR_DATE), [date]);
+        stored.points.push(...points.rows);
+        stored.workouts.push(...workouts.rows);
+      }
+      const diff = partitionIngest(batch.points, batch.workouts, stored);
+      const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
+      const hasRaw = shouldStoreRaw(batch);
+      if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && !options.quota && action === "skip") {
+        return { written: diff.written, unchanged: diff.unchanged };
+      }
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        if (shouldStoreRaw(batch)) {
+        if (hasRaw) {
           await client.query(toPostgres(INSERT_RAW), [batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload]);
         }
-        for (const point of batch.points) {
+        for (const point of diff.points) {
           await client.query(toPostgres(point.replace ? REPLACE_POINT : UPSERT_POINT), [
             point.date,
             point.metric,
@@ -68,7 +103,7 @@ export function createPostgresStorageFromPool(pool) {
             point.n,
           ]);
         }
-        for (const workout of batch.workouts) {
+        for (const workout of diff.workouts) {
           await client.query(toPostgres(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT), [
             workout.name,
             workout.start,
@@ -77,6 +112,11 @@ export function createPostgresStorageFromPool(pool) {
             workout.kcal,
           ]);
         }
+        if (options.quota) {
+          await client.query(toPostgres(UPSERT_QUOTA), [options.quota.tokenKey, options.quota.windowStart]);
+        }
+        if (action === "clear") await client.query(toPostgres(DELETE_HINT));
+        if (action === "set") await client.query(toPostgres(UPSERT_HINT), [options.hint]);
         await client.query("COMMIT");
       } catch (error) {
         try {
@@ -88,11 +128,13 @@ export function createPostgresStorageFromPool(pool) {
       } finally {
         client.release();
       }
+      return { written: diff.written, unchanged: diff.unchanged };
     },
     async queryDaySummary(date) {
       const points = await pool.query(toPostgres(POINTS_FOR_DATE), [date]);
       const workouts = await pool.query(toPostgres(WORKOUTS_FOR_DATE), [date]);
-      return summarizeDay(date, points.rows, workouts.rows);
+      const hint = await this.readExportHint();
+      return withExportHint(summarizeDay(date, points.rows, workouts.rows), hint);
     },
     async queryMetricRange(metric, startDate, endDate) {
       const result = await pool.query(toPostgres(METRIC_RANGE), [metric, startDate, endDate]);

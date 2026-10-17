@@ -2,10 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
+import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
 import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT,
-  REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE } from "./statements.js";
+  REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE,
+  READ_QUOTA, UPSERT_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -41,24 +43,54 @@ export function createSqliteStorage(filename) {
   const metricRange = db.prepare(METRIC_RANGE);
   const metricsStmt = db.prepare(LIST_METRICS);
   const workoutsRange = db.prepare(WORKOUTS_RANGE);
-  const insertAll = db.transaction((batch) => {
+  const readQuota = db.prepare(READ_QUOTA);
+  const upsertQuota = db.prepare(UPSERT_QUOTA);
+  const readHint = db.prepare(READ_HINT);
+  const upsertHint = db.prepare(UPSERT_HINT);
+  const deleteHint = db.prepare(DELETE_HINT);
+  const insertAll = db.transaction((batch, options = {}) => {
+    const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
+    const stored = { points: [], workouts: [] };
+    for (const date of dates) {
+      stored.points.push(...pointsForDate.all(date));
+      stored.workouts.push(...workoutsForDate.all(date));
+    }
+    const diff = partitionIngest(batch.points, batch.workouts, stored);
     if (shouldStoreRaw(batch)) {
       insertRaw.run(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload);
     }
-    for (const point of batch.points) {
+    for (const point of diff.points) {
       (point.replace ? replacePoint : upsertPoint).run(point.date, point.metric, point.sum_qty, point.last_qty, point.last_ts, point.units, point.n);
     }
-    for (const workout of batch.workouts) {
+    for (const workout of diff.workouts) {
       (workout.insertOnly ? insertWorkout : upsertWorkout).run(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal);
     }
+    if (options.quota) upsertQuota.run(options.quota.tokenKey, options.quota.windowStart);
+    const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
+    if (action === "clear") deleteHint.run();
+    if (action === "set") upsertHint.run(options.hint);
+    return { written: diff.written, unchanged: diff.unchanged };
   });
 
   return {
-    async insertIngest(batch) {
-      insertAll(batch);
+    async readIngestQuota(tokenKey, windowStart) {
+      return Number(readQuota.get(tokenKey, windowStart)?.hits ?? 0);
+    },
+    async readExportHint() {
+      return readHint.get()?.hint ?? null;
+    },
+    async setExportHint(hint) {
+      const action = hintAction(readHint.get()?.hint ?? null, hint);
+      if (action === "skip") return false;
+      if (action === "clear") deleteHint.run();
+      else upsertHint.run(hint);
+      return true;
+    },
+    async insertIngest(batch, options) {
+      return insertAll(batch, options);
     },
     async queryDaySummary(date) {
-      return summarizeDay(date, pointsForDate.all(date), workoutsForDate.all(date));
+      return withExportHint(summarizeDay(date, pointsForDate.all(date), workoutsForDate.all(date)), readHint.get()?.hint ?? null);
     },
     async queryMetricRange(metric, startDate, endDate) {
       return metricRange.all(metric, startDate, endDate);

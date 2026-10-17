@@ -54,7 +54,7 @@ Then create the database tables. Do this **before** you deploy:
 npx wrangler d1 migrations apply health-mcp --remote
 ```
 
-✅ **Checkpoint:** the command lists `0001_init.sql` and `0002_daily_points.sql` as applied, with no error.
+✅ **Checkpoint:** the command lists `0001_init.sql`, `0002_daily_points.sql`, and `0003_ingest_guards.sql` as applied, with no error.
 
 Prefer your own machine, a VPS, or Docker? See [Self-hosting](https://github.com/Airbloomer/health-mcp/blob/main/docs/self-hosting.md) for the Node.js and Docker options (SQLite or Postgres).
 
@@ -177,6 +177,19 @@ Your data appears only after the phone app's first sync. The sleep question work
 
 ✅ **Checkpoint:** the chatbot calls a health-mcp tool and answers with your numbers.
 
+## Recommended export settings
+
+Health Auto Export should post recent days, not a full history and not today alone. Create two REST API automations (the app allows one data type each) that both post to `https://<your-host>/ingest` with the header `Authorization: Bearer <HEALTH_INGEST_TOKEN>`.
+
+- **Format:** JSON, export version 2.
+- **Metrics:** Dietary Energy, Protein, Carbohydrates, Total Fat, Active Energy, Basal Energy Burned, Step Count, Weight, and Body Fat Percentage. Use one total per metric per day, not hourly buckets.
+- **Date range:** today and yesterday. Yesterday is the finished day. Today is the running total, sent again as the day fills in. A range of today only never sends yesterday's finished total. A full history is not stored here: points older than yesterday are dropped (`INGEST_MAX_AGE_DAYS`, default `1`, counted in the configured time zone).
+- **Schedule:** a few times a day, not every hour. The two automations share one token, and each run is a post. The default limit is 6 accepted posts per token per hour (`INGEST_RATE_LIMIT_PER_HOUR`).
+- **Workouts:** a second automation with the same URL, header, format, version, and date range. Leave route and per-second workout metrics off.
+- **Batch requests:** leave them off, so one day is not split across posts.
+
+A one-time full history belongs on `POST /import/apple-health`, not on the automation. Setup details are in [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
+
 ## Troubleshooting
 
 - **The chatbot or phone app says unauthorized (`401`).** Check that the header is exactly `Bearer`, one space, then the token. The URL token works only on three `POST` routes: the two Android webhook routes (`/ingest/hc-webhook`, `/ingest/life-dashboard`) and `/ingest/shortcuts`. It never works for `/mcp` or `/summary`.
@@ -184,6 +197,7 @@ Your data appears only after the phone app's first sync. The sleep question work
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 - **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
+- **`export_hint` is set on a summary.** A recent Health Auto Export post looked like a full history, or posts arrived too often. Follow [Recommended export settings](#recommended-export-settings).
 
 ## More documentation
 

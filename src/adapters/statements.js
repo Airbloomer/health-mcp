@@ -28,7 +28,7 @@ export const POINTS_FOR_DATE =
   "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily WHERE date = ?";
 
 export const WORKOUTS_FOR_DATE =
-  "SELECT name, start, duration_min, kcal FROM workouts WHERE date = ? ORDER BY start";
+  "SELECT name, start, date, duration_min, kcal FROM workouts WHERE date = ? ORDER BY start";
 
 export const METRIC_RANGE =
   "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily WHERE metric = ? AND date >= ? AND date <= ? ORDER BY date";
@@ -38,6 +38,20 @@ export const LIST_METRICS =
 
 export const WORKOUTS_RANGE =
   "SELECT name, start, date, duration_min, kcal FROM workouts WHERE date >= ? AND date <= ? ORDER BY date, start, name";
+
+export const READ_QUOTA =
+  "SELECT hits FROM ingest_quota WHERE token_key = ? AND window_start = ?";
+
+export const UPSERT_QUOTA =
+  "INSERT INTO ingest_quota (token_key, window_start, hits) VALUES (?, ?, 1) " +
+  "ON CONFLICT(token_key, window_start) DO UPDATE SET hits = hits + 1";
+
+export const READ_HINT = "SELECT hint FROM export_hint WHERE id = 1";
+
+export const UPSERT_HINT =
+  "INSERT INTO export_hint (id, hint) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET hint = excluded.hint";
+
+export const DELETE_HINT = "DELETE FROM export_hint WHERE id = 1";
 
 /** D1 rejects batches larger than this. */
 export const D1_BATCH_LIMIT = 500;
