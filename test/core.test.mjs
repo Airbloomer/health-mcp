@@ -290,7 +290,7 @@ test("malformed ingest bodies return 400", async () => {
   for (const body of bodies) {
     const response = await handleRequest(request("/ingest", { method: "POST", body }), ctx);
     assert.equal(response.status, 400, body);
-    assert.deepEqual(await response.json(), { error: "invalid_payload" });
+    assert.equal((await response.json()).error, "invalid_payload");
   }
   const empty = await handleRequest(request("/ingest", {
     method: "POST",

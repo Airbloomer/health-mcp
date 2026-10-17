@@ -11,6 +11,12 @@ import { LATEST_METRICS, SUM_METRICS } from "../src/core/metrics.js";
 import worker from "../src/index.js";
 import { expectedSummary, summaryDate } from "./expected.mjs";
 
+function sealBackfill(db) {
+  db.prepare(
+    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, ?, ?, 0, 0)",
+  ).run("2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+}
+
 function fetchAt(request, env) {
   return handleRequest(request, { ...contextFromEnv(env), now: env.now });
 }
@@ -95,6 +101,7 @@ test("cloudflare adapter ingests and summarizes through D1", async () => {
   assert.doesNotMatch(source, /\bnow\b/);
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  sealBackfill(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
 
   const denied = await worker.fetch(new Request(`http://example.test/summary?date=${summaryDate}`), env);
@@ -161,6 +168,7 @@ test("cloudflare adapter splits D1 writes into batches of 500", async () => {
 test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  sealBackfill(db);
   const writes = { n: 0 };
   const env = { DB: d1FromSqlite(db, writes), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const payload = sevenDayPayload();
@@ -213,6 +221,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
 test("a partial re-send does not overwrite the full-day total", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  sealBackfill(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const post = (body) => fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
@@ -254,6 +263,7 @@ test("a partial re-send does not overwrite the full-day total", async () => {
 test("D1 skips a raw payload larger than 1.5MB", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  sealBackfill(db);
   const big = "x".repeat(1_500_001);
   await new D1Storage(d1FromSqlite(db)).insertIngest({
     id: "big",
@@ -281,6 +291,7 @@ test("D1 skips a raw payload larger than 1.5MB", async () => {
 test("cloudflare adapter serves the read-only MCP tools", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  sealBackfill(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const headers = { authorization: "Bearer tok", "content-type": "application/json", accept: "application/json, text/event-stream" };
   const denied = await fetchAt(new Request("http://example.test/mcp", { method: "POST", body: "{}" }), env);

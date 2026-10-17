@@ -54,7 +54,7 @@ Then create the database tables. Do this **before** you deploy:
 npx wrangler d1 migrations apply health-mcp --remote
 ```
 
-✅ **Checkpoint:** the command lists `0001_init.sql`, `0002_daily_points.sql`, and `0003_ingest_guards.sql` as applied, with no error.
+✅ **Checkpoint:** the command lists `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, and `0004_ingest_backfill.sql` as applied, with no error.
 
 Prefer your own machine, a VPS, or Docker? See [Self-hosting](https://github.com/Airbloomer/health-mcp/blob/main/docs/self-hosting.md) for the Node.js and Docker options (SQLite or Postgres).
 
@@ -183,12 +183,18 @@ Health Auto Export should post recent days, not a full history and not today alo
 
 - **Format:** JSON, export version 2.
 - **Metrics:** Dietary Energy, Protein, Carbohydrates, Total Fat, Active Energy, Basal Energy Burned, Step Count, Weight, and Body Fat Percentage. Use one total per metric per day, not hourly buckets.
-- **Date range:** today and yesterday. Yesterday is the finished day. Today is the running total, sent again as the day fills in. A range of today only never sends yesterday's finished total. A full history is not stored here: points older than yesterday are dropped (`INGEST_MAX_AGE_DAYS`, default `1`, counted in the configured time zone). A date more than one day ahead is dropped too.
+- **Date range:** today and yesterday. Yesterday is the finished day. Today is the running total, sent again as the day fills in. A range of today only never sends yesterday's finished total. After the initial import window closes, points older than yesterday are dropped (`INGEST_MAX_AGE_DAYS`, default `1`, counted in the configured time zone). A date more than one day ahead is dropped too.
 - **Schedule:** a few times a day, not every hour. The two automations share one token, and each run is a post. The default limit is 6 accepted posts per token per hour (`INGEST_RATE_LIMIT_PER_HOUR`).
 - **Workouts:** a second automation with the same URL, header, format, version, and date range. Leave route and per-second workout metrics off.
 - **Batch requests:** leave them off, so one day is not split across posts.
 
-A one-time full history belongs on `POST /import/apple-health`, not on the automation. Setup details are in [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
+A one-time full history can be posted here during the initial import window, or at any time on `POST /import/apple-health`. Setup details are in [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md#health-auto-export).
+
+## Ingest limits
+
+On a self-hosted deployment the first accepted ingest opens an initial import window. There is no separate setup step. While it is open, Health Auto Export JSON on `POST /ingest` keeps any past date, each JSON body may be up to `INGEST_BACKFILL_MAX_BYTES` (default 25,000,000), and each token may send `INGEST_BACKFILL_MAX_PER_HOUR` posts (default 60). The window still rejects a date more than one day ahead. A total of `INGEST_BACKFILL_MAX_TOTAL_BYTES` (default 500,000,000) applies to the accepted bodies together, so a large history can be sent as smaller date-range chunks. Unchanged days are still skipped.
+
+The window closes for good at the first of these: `INGEST_BACKFILL_HOURS` after it opened (default 72), the total byte cap, or a request with `"backfill": "done"` or the header `X-Backfill: done`. It does not reopen. After that, the steady limits apply again: today and yesterday, `INGEST_MAX_BODY_BYTES` (default 1,000,000), and `INGEST_RATE_LIMIT_PER_HOUR` (default 6). Every ingest response includes `backfill` with `open`, `closes_at`, and `bytes_remaining`. A chunk that is too large during the window returns `413` and asks for a shorter date range. After the window is closed, an old date returns `422` and an oversized or too-frequent post returns `413` or `429`, and the message says the initial import window is closed.
 
 ## Troubleshooting
 

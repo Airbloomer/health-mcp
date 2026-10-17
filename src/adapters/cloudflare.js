@@ -17,6 +17,10 @@ export function contextFromEnv(env) {
     ingestMaxAgeDays: env?.INGEST_MAX_AGE_DAYS,
     ingestMaxBodyBytes: env?.INGEST_MAX_BODY_BYTES,
     ingestRatePerHour: env?.INGEST_RATE_LIMIT_PER_HOUR,
+    ingestBackfillMaxBytes: env?.INGEST_BACKFILL_MAX_BYTES,
+    ingestBackfillPerHour: env?.INGEST_BACKFILL_MAX_PER_HOUR,
+    ingestBackfillTotalBytes: env?.INGEST_BACKFILL_MAX_TOTAL_BYTES,
+    ingestBackfillHours: env?.INGEST_BACKFILL_HOURS,
     storage: new D1Storage(env?.DB),
   };
 }

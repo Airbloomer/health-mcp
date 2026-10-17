@@ -26,6 +26,7 @@ test("postgres stores the quota hour past a 32-bit integer", { skip: url ? false
     await pool.query("DELETE FROM points_daily");
     await pool.query("DELETE FROM workouts");
     await pool.query("DELETE FROM raw_payloads");
+    await pool.query("DELETE FROM ingest_backfill");
 
     const column = await pool.query(
       "SELECT data_type FROM information_schema.columns WHERE table_name = 'ingest_quota' AND column_name = 'window_start'",
@@ -38,6 +39,7 @@ test("postgres stores the quota hour past a 32-bit integer", { skip: url ? false
       timeZone: "UTC",
       now: NOW,
       ingestRatePerHour: 2,
+      ingestBackfillPerHour: 2,
     };
     const body = JSON.stringify({
       data: {

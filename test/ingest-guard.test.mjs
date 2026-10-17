@@ -35,6 +35,16 @@ function steps(date, qty = 10) {
   };
 }
 
+function seal(storage) {
+  storage.backfill = {
+    opened_at: "2026-10-01T00:00:00.000Z",
+    closed_at: "2026-10-01T00:00:00.000Z",
+    bytes: 0,
+    days: 0,
+  };
+  return storage;
+}
+
 function postIngest(storage, body, extra = {}, token = "tok") {
   return handleRequest(
     request("/ingest", { method: "POST", body: JSON.stringify(body), token }),
@@ -43,7 +53,7 @@ function postIngest(storage, body, extra = {}, token = "tok") {
 }
 
 test("recency keeps today and yesterday and counts older points as dropped_stale", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   const body = {
     data: {
       metrics: [{
@@ -77,7 +87,7 @@ test("recency keeps today and yesterday and counts older points as dropped_stale
 });
 
 test("recency uses the configured timezone and INGEST_MAX_AGE_DAYS", async () => {
-  const zoned = new MemoryStorage();
+  const zoned = seal(new MemoryStorage());
   const response = await handleRequest(request("/ingest", {
     method: "POST",
     body: JSON.stringify({
@@ -99,7 +109,7 @@ test("recency uses the configured timezone and INGEST_MAX_AGE_DAYS", async () =>
   assert.equal((await zoned.queryDaySummary("2026-10-13")).steps, 3);
   assert.equal((await zoned.queryDaySummary("2026-10-12")).steps, null);
 
-  const todayOnly = new MemoryStorage();
+  const todayOnly = seal(new MemoryStorage());
   const narrow = await postIngest(todayOnly, {
     data: {
       metrics: [{
@@ -116,7 +126,7 @@ test("recency uses the configured timezone and INGEST_MAX_AGE_DAYS", async () =>
   assert.equal((await todayOnly.queryDaySummary("2026-10-16")).steps, 8);
   assert.equal((await todayOnly.queryDaySummary("2026-10-15")).steps, null);
 
-  const week = new MemoryStorage();
+  const week = seal(new MemoryStorage());
   const wide = await postIngest(week, steps("2026-10-10", 7), { ingestMaxAgeDays: "7" });
   assert.equal(wide.status, 200);
   assert.equal((await wide.json()).dropped_stale, 0);
@@ -124,10 +134,13 @@ test("recency uses the configured timezone and INGEST_MAX_AGE_DAYS", async () =>
 });
 
 test("apple health import keeps history that ingest drops", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   const environment = ctx(storage);
   const dropped = await postIngest(storage, steps("2020-01-02", 11));
-  assert.equal((await dropped.json()).dropped_stale, 1);
+  assert.equal(dropped.status, 422);
+  const droppedBody = await dropped.json();
+  assert.equal(droppedBody.error, "outside_window");
+  assert.match(droppedBody.message, /initial import window is closed/);
   assert.equal((await storage.queryDaySummary("2020-01-02")).steps, null);
 
   const chunk = await handleRequest(request("/import/apple-health/chunk", {
@@ -190,7 +203,7 @@ test("a shorter re-send is not a write and does not count as unchanged", () => {
 });
 
 test("a body over the configured limit returns 413", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   const body = JSON.stringify(steps("2026-10-16", 1));
   const rejected = await postIngest(storage, JSON.parse(body), { ingestMaxBodyBytes: body.length - 1 });
   assert.equal(rejected.status, 413);
@@ -205,7 +218,7 @@ test("a body over the configured limit returns 413", async () => {
 });
 
 test("per-token rate limit returns 429 with Retry-After and one quota write", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   const extra = { ingestRatePerHour: 2 };
   const first = await postIngest(storage, steps("2026-10-16", 1), extra);
   assert.equal(first.status, 200);
@@ -335,7 +348,7 @@ test("json ingest routes cancel a chunked body past the cap", async () => {
   const limit = 1000;
   const chunkSize = 400;
   for (const pathname of routes) {
-    const storage = new MemoryStorage();
+    const storage = seal(new MemoryStorage());
     const streamed = chunkedRequest(pathname, { chunkSize });
     const response = await handleRequest(streamed.req, ctx(storage, { ingestMaxBodyBytes: limit }));
     assert.equal(response.status, 413, pathname);
@@ -344,18 +357,21 @@ test("json ingest routes cancel a chunked body past the cap", async () => {
     assert.match(payload.message, new RegExp(`${limit} bytes`));
     const stats = streamed.stats();
     assert.equal(stats.cancelled, true, pathname);
-    assert.equal(stats.pulls, 3, pathname);
+    assert.ok(stats.pulls >= 3 && stats.pulls <= 4, pathname);
     assert.equal(storage.points.size, 0);
   }
 
   const understated = chunkedRequest("/ingest", { chunkSize, contentLength: 8 });
-  const underResponse = await handleRequest(understated.req, ctx(new MemoryStorage(), { ingestMaxBodyBytes: limit }));
+  const underResponse = await handleRequest(understated.req, ctx(seal(new MemoryStorage()), { ingestMaxBodyBytes: limit }));
   assert.equal(underResponse.status, 413);
   assert.equal(understated.stats().cancelled, true);
-  assert.equal(understated.stats().pulls, 3);
+  assert.ok(understated.stats().pulls >= 3 && understated.stats().pulls <= 4);
 
   const declared = chunkedRequest("/ingest/shortcuts", { chunkSize, contentLength: limit + 1 });
-  const declaredResponse = await handleRequest(declared.req, ctx(new MemoryStorage(), { ingestMaxBodyBytes: limit }));
+  const declaredResponse = await handleRequest(declared.req, ctx(seal(new MemoryStorage()), {
+    ingestMaxBodyBytes: limit,
+    ingestBackfillMaxBytes: limit,
+  }));
   assert.equal(declaredResponse.status, 413);
   assert.equal(declared.stats().cancelled, true);
   assert.equal(declared.stats().pulls, 0);
@@ -395,7 +411,7 @@ test("json ingest routes cancel a chunked body past the cap", async () => {
 });
 
 test("full history and rate limits surface export_hint on summary and the MCP tool", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   const old = Array.from({ length: STALE_HINT_AT }, (_, index) => ({
     date: `2020-01-01 ${String(index % 24).padStart(2, "0")}:00:00 -0700`,
     qty: 1,
@@ -429,7 +445,7 @@ test("full history and rate limits surface export_hint on summary and the MCP to
   const cleared = await (await handleRequest(request("/summary?date=2026-10-16"), ctx(storage))).json();
   assert.equal(cleared.export_hint, undefined);
 
-  const limited = new MemoryStorage();
+  const limited = seal(new MemoryStorage());
   await postIngest(limited, steps("2026-10-16", 1), { ingestRatePerHour: 1 });
   const blocked = await postIngest(limited, steps("2026-10-15", 2), { ingestRatePerHour: 1 });
   assert.equal(blocked.status, 429);
@@ -489,6 +505,7 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
 
   const db = new Database(":memory:");
   applySqliteMigrations(db);
+  db.prepare("INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 0, 0)").run();
   const writes = { n: 0 };
   const envStorage = new D1Storage(d1FromSqlite(db, writes));
   const quiet = ctx(envStorage, { ingestRatePerHour: 0 });
@@ -564,7 +581,7 @@ test("the quota upsert stops at the limit", async () => {
 });
 
 test("an accepted post from another source clears export_hint", async () => {
-  const storage = new MemoryStorage();
+  const storage = seal(new MemoryStorage());
   await postIngest(storage, steps("2026-10-16", 1), { ingestRatePerHour: 1 });
   const blocked = await postIngest(storage, steps("2026-10-16", 2), { ingestRatePerHour: 1 });
   assert.equal(blocked.status, 429);

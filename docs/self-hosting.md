@@ -96,6 +96,10 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `INGEST_MAX_AGE_DAYS` | no | Wrangler `[vars]`, or the process environment | How many days before today Health Auto Export JSON on `POST /ingest` may include. Default `1` (today and yesterday in `HEALTH_TIMEZONE`). Values above 36500 are clamped to 36500. Older points are dropped and counted as `dropped_stale`. Dates more than one day after today are counted as `dropped_future`. `POST /import/apple-health` ignores this. |
 | `INGEST_MAX_BODY_BYTES` | no | Wrangler `[vars]`, or the process environment | Maximum JSON ingest body in bytes. Default `1000000`. A larger body returns `413` with `payload_too_large`. Capped at 20,000,000. |
 | `INGEST_RATE_LIMIT_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour. Default `6`. `0` disables the limit. Over the limit returns `429` with `Retry-After`. |
+| `INGEST_BACKFILL_HOURS` | no | Wrangler `[vars]`, or the process environment | How long the initial import window stays open after the first accepted ingest. Default `72`. Values below 1 use the default. Values above 8784 are clamped to 8784. |
+| `INGEST_BACKFILL_MAX_BYTES` | no | Wrangler `[vars]`, or the process environment | Per-request JSON body cap while the initial import window is open. Default `25000000`. Clamped to 100000000. |
+| `INGEST_BACKFILL_MAX_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour while the initial import window is open. Default `60`. Clamped to 10000. |
+| `INGEST_BACKFILL_MAX_TOTAL_BYTES` | no | Wrangler `[vars]`, or the process environment | Total accepted body bytes for the whole initial import window. Default `500000000`. Clamped to 5000000000. |
 
 Copy [`.env.example`](../.env.example) to `.env` for Node, or [`dev.vars.example`](../dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
@@ -114,7 +118,7 @@ npm test
 
 ```
 src/core                 parse, daily aggregate, summarize, bearer auth, HTTP, MCP
-src/core/ingest-guard.js recency window, body limit, rate limit, unchanged rows
+src/core/ingest-guard.js recency window, body limit, rate limit, initial import window, unchanged rows
 src/core/hk.js           HealthKit quantity and workout names
 src/core/apple-export.js streaming export.xml and zip parser
 src/core/health-export-pro.js
