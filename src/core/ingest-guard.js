@@ -13,6 +13,9 @@ export const DEFAULT_INGEST_RATE_PER_HOUR = 6;
 /** A payload that drops at least this many dated records looks like a full history. */
 export const STALE_HINT_AT = 50;
 
+/** Dates after today plus this many days are dropped. Covers timezone and device skew. */
+export const FUTURE_SKEW_DAYS = 1;
+
 export const EXPORT_HINT =
   "This export looks misconfigured: it sent a full history or it is posting too often. Follow Recommended export settings in the README (JSON version 2, one total per day, today and yesterday, a few times a day).";
 
@@ -75,30 +78,37 @@ export function rateLimitedBody(limit) {
   };
 }
 
-export async function tokenDigest(value) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value ?? "")));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 /**
- * Keep points and workouts on or after today minus `maxAgeDays`.
- * `dropped_stale` counts dated samples and workouts that were left out.
+ * Keep points and workouts from today minus `maxAgeDays` through today plus
+ * `FUTURE_SKEW_DAYS`. `dropped_stale` and `dropped_future` count dated samples
+ * and workouts left out on each side.
  */
 export function filterRecent(points, workouts, { now, timeZone, maxAgeDays }) {
   const today = localDate(now.toISOString(), timeZone);
   const cutoff = shiftIsoDate(today, -maxAgeDays);
+  const future = shiftIsoDate(today, FUTURE_SKEW_DAYS);
   const keptPoints = [];
   const keptWorkouts = [];
-  let dropped = 0;
+  let droppedStale = 0;
+  let droppedFuture = 0;
   for (const point of points || []) {
-    if (point.date < cutoff) dropped += 1;
+    if (point.date > future) droppedFuture += 1;
+    else if (point.date < cutoff) droppedStale += 1;
     else keptPoints.push(point);
   }
   for (const workout of workouts || []) {
-    if (workout.date < cutoff) dropped += 1;
+    if (workout.date > future) droppedFuture += 1;
+    else if (workout.date < cutoff) droppedStale += 1;
     else keptWorkouts.push(workout);
   }
-  return { points: keptPoints, workouts: keptWorkouts, dropped_stale: dropped, cutoff, today };
+  return {
+    points: keptPoints,
+    workouts: keptWorkouts,
+    dropped_stale: droppedStale,
+    dropped_future: droppedFuture,
+    cutoff,
+    today,
+  };
 }
 
 function numEq(left, right) {

@@ -1,5 +1,7 @@
--- One counter per token per UTC hour. An accepted post increments `hits` once.
--- Rejected posts do not write this table.
+-- One counter per auth path per UTC hour. `token_key` is the label "bearer" or
+-- "url", not the credential. An accepted post increments `hits` once.
+-- Rejected posts do not write this table. Old hours are left in place so the
+-- accepted post stays a single counter write.
 CREATE TABLE IF NOT EXISTS ingest_quota (
   token_key TEXT NOT NULL,
   window_start INTEGER NOT NULL,

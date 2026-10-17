@@ -1,4 +1,4 @@
-import { aggregateDays, shouldStoreRaw, storedMetricSet, utf8Bytes } from "./aggregate.js";
+import { aggregateDays, shouldStoreRaw, storedMetricSet } from "./aggregate.js";
 import { appleChunkError, looksLikeAppleExport, parseAppleExport } from "./apple-export.js";
 import { authed } from "./auth.js";
 import { hcWebhookError, isHcWebhook, parseHcWebhook } from "./hc-webhook.js";
@@ -14,7 +14,6 @@ import {
   resolveRatePerHour,
   secondsUntilNextHour,
   STALE_HINT_AT,
-  tokenDigest,
 } from "./ingest-guard.js";
 import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-dashboard.js";
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
@@ -63,9 +62,9 @@ function rateLimited(limit, now) {
   return response;
 }
 
-function rateIdentity(req, ctx) {
-  if (req.headers.get("authorization")) return `bearer\0${ctx.token ?? ""}`;
-  return `url\0${ctx.urlToken ?? ""}`;
+/** One label per auth path. The credential itself is never stored. */
+function rateKey(req) {
+  return req.headers.get("authorization") ? "bearer" : "url";
 }
 
 /**
@@ -73,12 +72,16 @@ function rateIdentity(req, ctx) {
  * increment. The hint row is written only when its text changes, so a run of
  * rejected posts writes at most once. An accepted post records the hit later,
  * as one statement beside the data writes.
+ *
+ * The read and the increment are separate, so two overlapping posts can both
+ * pass the read and land one past the limit. That small overshoot is accepted.
+ * Old hour rows are not deleted here, so the accepted post stays one extra write.
  */
 async function claimQuota(req, ctx) {
   const limit = resolveRatePerHour(ctx.ingestRatePerHour);
   if (limit === 0) return { ticket: null };
   const now = requestNow(ctx);
-  const tokenKey = await tokenDigest(rateIdentity(req, ctx));
+  const tokenKey = rateKey(req);
   const windowStart = hourWindowStart(now);
   const hits = await ctx.storage.readIngestQuota(tokenKey, windowStart);
   if (hits >= limit) {
@@ -92,10 +95,161 @@ function jsonByteLimit(ctx) {
   return resolveMaxBodyBytes(ctx.ingestMaxBodyBytes);
 }
 
-function overJsonLimit(text, ctx) {
+function payloadTooLargeError() {
+  const error = new Error("payload_too_large");
+  error.code = "PAYLOAD_TOO_LARGE";
+  return error;
+}
+
+async function cancelStream(stream) {
+  try {
+    await stream?.cancel();
+  } catch {
+    // The body may already be locked or closed.
+  }
+}
+
+function concatBytes(chunks, size) {
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/**
+ * "apple" once the prefix is export XML or a zip local header, "json" once it
+ * cannot be either, "unknown" while the prefix is still too short to tell.
+ */
+function ingestBodyKind(bytes) {
+  if (looksLikeAppleExport(bytes)) return "apple";
+  let index = 0;
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) index = 3;
+  else if (bytes.length > 0 && bytes[0] === 0xef) return "unknown";
+  while (index < bytes.length && (bytes[index] === 0x20 || bytes[index] === 0x09 || bytes[index] === 0x0a || bytes[index] === 0x0d)) {
+    index += 1;
+  }
+  if (index >= bytes.length) return "unknown";
+  if (bytes[index] === 0x3c) return "apple";
+  if (bytes[index] === 0x50 && bytes.length - index < 4) return "unknown";
+  return "json";
+}
+
+/**
+ * Read a body up to `limit` bytes.
+ * A Content-Length over the limit is rejected before the stream is read.
+ * A missing or smaller Content-Length is cancelled as soon as the next chunk
+ * would pass the limit, and that chunk is not kept.
+ */
+export async function readCapped(req, limit) {
+  const declared = declaredContentLength(req.headers.get("content-length"));
+  if (declared != null && declared > limit) {
+    await cancelStream(req.body);
+    throw payloadTooLargeError();
+  }
+  if (req.body == null) return new Uint8Array(0);
+  return readLimited(req.body.getReader(), limit);
+}
+
+async function readLimited(reader, limit) {
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (size + value.byteLength > limit) {
+        await reader.cancel().catch(() => {});
+        throw payloadTooLargeError();
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // cancel() already released the lock
+  }
+  return concatBytes(chunks, size);
+}
+
+/**
+ * POST /ingest may be JSON or an Apple export. JSON stops at `jsonLimit`.
+ * An Apple export may continue to the larger ingest cap. The kind is decided
+ * from the prefix, so a chunked JSON body is cancelled at the JSON cap.
+ */
+async function readIngestBytes(req, jsonLimit) {
+  const declared = declaredContentLength(req.headers.get("content-length"));
+  const type = req.headers.get("content-type") || "";
+  if (declared != null && declared > MAX_PAYLOAD_CHARS) {
+    await cancelStream(req.body);
+    const error = payloadTooLargeError();
+    error.apple = true;
+    throw error;
+  }
+  if (declared != null && declared > jsonLimit && type.includes("json")) {
+    await cancelStream(req.body);
+    throw payloadTooLargeError();
+  }
+  if (req.body == null) return new Uint8Array(0);
+  if (declared != null && declared <= jsonLimit) return readCapped(req, jsonLimit);
+  return readPrefixedIngest(req.body.getReader(), jsonLimit);
+}
+
+async function readPrefixedIngest(reader, jsonLimit) {
+  const chunks = [];
+  const prefix = [];
+  let size = 0;
+  let prefixSize = 0;
+  let kind = "unknown";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (kind === "unknown") {
+        prefix.push(value);
+        prefixSize += value.byteLength;
+        kind = ingestBodyKind(concatBytes(prefix, prefixSize));
+      }
+      const limit = kind === "apple" ? MAX_PAYLOAD_CHARS : jsonLimit;
+      if (size + value.byteLength > limit) {
+        await reader.cancel().catch(() => {});
+        const error = payloadTooLargeError();
+        if (kind === "apple") error.apple = true;
+        throw error;
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // cancel() already released the lock
+  }
+  if (kind !== "apple" && size > jsonLimit) throw payloadTooLargeError();
+  return concatBytes(chunks, size);
+}
+
+/** JSON text, or a 413 response when the body passes the configured cap. */
+async function readJsonText(req, ctx) {
   const limit = jsonByteLimit(ctx);
-  if (utf8Bytes(text) > limit) return tooLarge(limit);
-  return null;
+  try {
+    const bytes = await readCapped(req, limit);
+    return { text: new TextDecoder().decode(bytes) };
+  } catch (error) {
+    if (error?.code === "PAYLOAD_TOO_LARGE") return { response: tooLarge(limit) };
+    throw error;
+  }
 }
 
 /**
@@ -202,15 +356,21 @@ async function acceptAppleExport(source, ctx, quota = null) {
 }
 
 async function ingest(req, ctx) {
-  const bytes = new Uint8Array(await req.arrayBuffer());
+  const limit = jsonByteLimit(ctx);
+  let bytes;
+  try {
+    bytes = await readIngestBytes(req, limit);
+  } catch (error) {
+    if (error?.code === "PAYLOAD_TOO_LARGE") {
+      return error.apple ? json({ error: "payload_too_large" }, 413) : tooLarge(limit);
+    }
+    throw error;
+  }
   if (looksLikeAppleExport(bytes)) {
-    if (bytes.byteLength > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
     const quota = await claimQuota(req, ctx);
     if (quota.response) return quota.response;
     return acceptAppleExport(bytes, ctx, quota.ticket);
   }
-  const limit = jsonByteLimit(ctx);
-  if (bytes.byteLength > limit) return tooLarge(limit);
   const text = new TextDecoder().decode(bytes);
   let body;
   try {
@@ -231,9 +391,9 @@ async function ingest(req, ctx) {
 }
 
 async function ingestHealthExportPro(req, ctx) {
-  const text = await req.text();
-  const oversized = overJsonLimit(text, ctx);
-  if (oversized) return oversized;
+  const read = await readJsonText(req, ctx);
+  if (read.response) return read.response;
+  const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
@@ -245,9 +405,9 @@ async function ingestHealthExportPro(req, ctx) {
 }
 
 async function ingestHcWebhook(req, ctx) {
-  const text = await req.text();
-  const oversized = overJsonLimit(text, ctx);
-  if (oversized) return oversized;
+  const read = await readJsonText(req, ctx);
+  if (read.response) return read.response;
+  const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
@@ -260,9 +420,9 @@ async function ingestHcWebhook(req, ctx) {
 }
 
 async function ingestLifeDashboard(req, ctx) {
-  const text = await req.text();
-  const oversized = overJsonLimit(text, ctx);
-  if (oversized) return oversized;
+  const read = await readJsonText(req, ctx);
+  if (read.response) return read.response;
+  const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
@@ -275,9 +435,9 @@ async function ingestLifeDashboard(req, ctx) {
 }
 
 async function ingestSyncFit(req, ctx) {
-  const text = await req.text();
-  const oversized = overJsonLimit(text, ctx);
-  if (oversized) return oversized;
+  const read = await readJsonText(req, ctx);
+  if (read.response) return read.response;
+  const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
@@ -289,12 +449,9 @@ async function ingestSyncFit(req, ctx) {
 }
 
 async function ingestShortcuts(req, ctx) {
-  const limit = jsonByteLimit(ctx);
-  const declared = declaredContentLength(req.headers.get("content-length"));
-  if (declared != null && declared > limit) return tooLarge(limit);
-  const text = await req.text();
-  const oversized = overJsonLimit(text, ctx);
-  if (oversized) return oversized;
+  const read = await readJsonText(req, ctx);
+  if (read.response) return read.response;
+  const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
@@ -341,7 +498,7 @@ async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
     });
     points = filtered.points;
     workouts = filtered.workouts;
-    extra = { dropped_stale: filtered.dropped_stale };
+    extra = { dropped_stale: filtered.dropped_stale, dropped_future: filtered.dropped_future };
     hint = filtered.dropped_stale >= STALE_HINT_AT ? EXPORT_HINT : null;
   }
   const quota = await claimQuota(req, ctx);
@@ -368,8 +525,13 @@ async function importApple(req, ctx) {
 }
 
 async function importAppleChunk(req, ctx) {
-  const text = await req.text();
-  if (text.length > MAX_PAYLOAD_CHARS) return json({ error: "payload_too_large" }, 413);
+  let text;
+  try {
+    text = new TextDecoder().decode(await readCapped(req, MAX_PAYLOAD_CHARS));
+  } catch (error) {
+    if (error?.code === "PAYLOAD_TOO_LARGE") return json({ error: "payload_too_large" }, 413);
+    throw error;
+  }
   let body;
   try {
     body = JSON.parse(text);

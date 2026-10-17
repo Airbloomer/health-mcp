@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import { test } from "node:test";
+import { contextFromEnv } from "../src/adapters/cloudflare.js";
 import { D1Storage } from "../src/adapters/d1.js";
 import { applySqliteMigrations } from "../src/adapters/sqlite.js";
 import { D1_BATCH_LIMIT } from "../src/adapters/statements.js";
+import { handleRequest } from "../src/core/http.js";
 import { LATEST_METRICS, SUM_METRICS } from "../src/core/metrics.js";
 import worker from "../src/index.js";
 import { expectedSummary, summaryDate } from "./expected.mjs";
+
+function fetchAt(request, env) {
+  return handleRequest(request, { ...contextFromEnv(env), now: env.now });
+}
 
 const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
 
@@ -85,6 +91,8 @@ function sevenDayPayload() {
 }
 
 test("cloudflare adapter ingests and summarizes through D1", async () => {
+  const source = fs.readFileSync(new URL("../src/adapters/cloudflare.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bnow\b/);
   const db = new Database(":memory:");
   applySqliteMigrations(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
@@ -92,7 +100,7 @@ test("cloudflare adapter ingests and summarizes through D1", async () => {
   const denied = await worker.fetch(new Request(`http://example.test/summary?date=${summaryDate}`), env);
   assert.equal(denied.status, 401);
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
     body: JSON.stringify(sample),
@@ -100,7 +108,7 @@ test("cloudflare adapter ingests and summarizes through D1", async () => {
   assert.equal(ingested.status, 200);
   assert.equal((await ingested.json()).points, 11);
 
-  const summarized = await worker.fetch(
+  const summarized = await fetchAt(
     new Request(`http://example.test/summary?date=${summaryDate}`, { headers: { authorization: "Bearer tok" } }),
     env,
   );
@@ -158,7 +166,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   const payload = sevenDayPayload();
   const sampleCount = payload.data.metrics.reduce((sum, metric) => sum + metric.data.length, 0);
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -178,7 +186,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_payloads").get().n, 0);
   assert.equal(writes.n, storedMetrics + workouts);
 
-  const day = await (await worker.fetch(
+  const day = await (await fetchAt(
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
     env,
   )).json();
@@ -186,14 +194,14 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   assert.equal(day.workouts.length, 2);
 
   const before = writes.n;
-  const again = await worker.fetch(new Request("http://example.test/ingest", {
+  const again = await fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
     body: JSON.stringify(payload),
   }), env);
   assert.equal(again.status, 200);
   assert.equal(writes.n - before, 0);
-  const retried = await (await worker.fetch(
+  const retried = await (await fetchAt(
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
     env,
   )).json();
@@ -206,7 +214,7 @@ test("a partial re-send does not overwrite the full-day total", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
-  const post = (body) => worker.fetch(new Request("http://example.test/ingest", {
+  const post = (body) => fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -233,7 +241,7 @@ test("a partial re-send does not overwrite the full-day total", async () => {
     },
   });
   assert.equal(partial.status, 200);
-  const summary = await (await worker.fetch(
+  const summary = await (await fetchAt(
     new Request("http://example.test/summary?date=2026-10-14", { headers: { authorization: "Bearer tok" } }),
     env,
   )).json();
@@ -275,23 +283,23 @@ test("cloudflare adapter serves the read-only MCP tools", async () => {
   applySqliteMigrations(db);
   const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const headers = { authorization: "Bearer tok", "content-type": "application/json", accept: "application/json, text/event-stream" };
-  const denied = await worker.fetch(new Request("http://example.test/mcp", { method: "POST", body: "{}" }), env);
+  const denied = await fetchAt(new Request("http://example.test/mcp", { method: "POST", body: "{}" }), env);
   assert.equal(denied.status, 401);
 
-  const blocked = await worker.fetch(new Request("http://example.test/mcp", {
+  const blocked = await fetchAt(new Request("http://example.test/mcp", {
     method: "POST",
     headers: { authorization: "Bearer tok", origin: "https://example.com", "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
   }), env);
   assert.equal(blocked.status, 403);
-  const allowed = await worker.fetch(new Request("http://example.test/mcp", {
+  const allowed = await fetchAt(new Request("http://example.test/mcp", {
     method: "POST",
     headers: { authorization: "Bearer tok", origin: "https://example.com", "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
   }), { ...env, MCP_ALLOWED_ORIGINS: "https://example.com" });
   assert.equal(allowed.status, 200);
 
-  const ingested = await worker.fetch(new Request("http://example.test/ingest", {
+  const ingested = await fetchAt(new Request("http://example.test/ingest", {
     method: "POST",
     headers,
     body: JSON.stringify(sample),
@@ -299,7 +307,7 @@ test("cloudflare adapter serves the read-only MCP tools", async () => {
   assert.equal(ingested.status, 200);
 
   const call = async (name, args) => {
-    const response = await worker.fetch(new Request("http://example.test/mcp", {
+    const response = await fetchAt(new Request("http://example.test/mcp", {
       method: "POST",
       headers,
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
