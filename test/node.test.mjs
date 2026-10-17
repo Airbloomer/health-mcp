@@ -278,4 +278,43 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
   assert.equal(queries.some((query) => query.sql === toPostgres(WORKOUTS_RANGE)), true);
   assert.equal(queries.some((query) => /CREATE TABLE IF NOT EXISTS raw_payloads/i.test(query.sql)), true);
   assert.equal(queries.some((query) => /CREATE TABLE IF NOT EXISTS points_daily/i.test(query.sql)), true);
+  assert.equal(queries.some((query) => /ADD COLUMN IF NOT EXISTS deadline TEXT/.test(query.sql)), true);
+  assert.equal(queries.some((query) => /ADD COLUMN IF NOT EXISTS total_bytes BIGINT/.test(query.sql)), true);
+});
+
+test("postgres sets local timeouts on the reserving connection", async () => {
+  const queries = [];
+  const client = {
+    async query(sql) {
+      queries.push(sql);
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const pool = {
+    async query() {
+      return { rows: [] };
+    },
+    async connect() {
+      return client;
+    },
+    async end() {},
+  };
+  const storage = createPostgresStorageFromPool(pool);
+  await storage.reserveIngestBackfill({
+    openedAt: "2026-10-16T12:30:00.000Z",
+    closeAt: null,
+    addBytes: 1,
+    totalBytes: 10,
+    deadline: "2026-10-19T12:30:00.000Z",
+    nowIso: "2026-10-16T12:30:00.000Z",
+    points: [],
+    workouts: [],
+  });
+  queries.length = 0;
+  await storage.withIngestTransaction(async () => {});
+  assert.equal(queries.includes("SET LOCAL lock_timeout = '4s'"), true);
+  assert.equal(queries.includes("SET LOCAL statement_timeout = '8s'"), true);
+  assert.equal(queries[0], "BEGIN");
+  assert.equal(queries.at(-1), "COMMIT");
 });

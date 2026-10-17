@@ -100,7 +100,22 @@ export class MemoryStorage {
       try {
         if (args.write) await args.write();
       } catch (error) {
-        this.backfill = snapshot;
+        // Restore this group's bytes and days. Keep a close this request
+        // caused: a failed filling write must not reopen the window.
+        const closedNow = this.backfill?.closed_at ?? null;
+        if (!snapshot) {
+          if (closedNow) {
+            this.backfill.bytes = 0;
+            this.backfill.days = 0;
+          } else {
+            this.backfill = null;
+          }
+        } else {
+          this.backfill = {
+            ...snapshot,
+            closed_at: closedNow && !snapshot.closed_at ? closedNow : snapshot.closed_at,
+          };
+        }
         throw error;
       }
       return { ...this.backfill };

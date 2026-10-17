@@ -104,15 +104,17 @@ export class D1Storage {
     try {
       if (args.write) await args.write();
     } catch (error) {
+      // Release only this group's share. Never clear closed_at, and do not
+      // delete a row this reservation closed.
       const release = this.db.prepare(RELEASE_BACKFILL).bind(
         args.addBytes,
         addDays,
         addDays,
-        reserved.closed_at,
         args.addBytes,
       );
-      const clear = this.db.prepare(DELETE_EMPTY_BACKFILL).bind();
-      await this.run(() => this.db.batch([release, clear]));
+      const statements = [release];
+      if (!reserved.closed_at) statements.push(this.db.prepare(DELETE_EMPTY_BACKFILL).bind());
+      await this.run(() => this.db.batch(statements));
       throw error;
     }
     return reserved;
