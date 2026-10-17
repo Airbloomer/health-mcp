@@ -225,7 +225,11 @@ export function createPostgresStorageFromPool(pool) {
       const stored = await this.loadStored(dates, client);
       const diff = partitionIngest(batch.points, batch.workouts, stored);
       const newDays = countNewDays(batch.points, batch.workouts, stored);
-      const action = hintAction(options.hint === undefined ? null : await this.readExportHint(client), options.hint);
+      let action = "skip";
+      if (options.hint !== undefined) {
+        const current = options.hintKnown ? options.knownHint ?? null : await this.readExportHint(client);
+        action = hintAction(current, options.hint);
+      }
       const hasRaw = shouldStoreRaw(batch);
       const chunks = ingestWriteChunks(diff.points, diff.workouts);
       let markerId = null;

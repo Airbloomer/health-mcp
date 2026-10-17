@@ -35,6 +35,7 @@ export default {
     } catch (error) {
       if (error?.code === "D1_DAILY_LIMIT") return dailyLimitResponse(error.limit);
       if (retryableDatabaseError(error)) {
+        console.error(`unavailable ${error?.code || "database"}`);
         return new Response(JSON.stringify({ error: "unavailable" }), {
           status: 503,
           headers: {

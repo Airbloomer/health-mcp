@@ -8,6 +8,7 @@ import {
   byteShares,
   dateGroups,
   exportHint,
+  APPLE_CHUNK_COMMAND,
   activeIngestLimits,
   backfillClosesAt,
   backfillLimits,
@@ -417,8 +418,19 @@ function willCharge(batch, state) {
  * D1 only. The projection uses the same chunk lists as the write, and it
  * runs before any write. Other adapters have no statement budget.
  */
-function overStatements(ctx, batch, state) {
+async function rememberHint(ctx, batch) {
+  if (batch.hint === undefined || batch.hintKnown) return;
+  const points = batch.points || [];
+  const workouts = batch.workouts || [];
+  if (points.length + workouts.length === 0) return;
+  if (typeof ctx.storage.readExportHint !== "function") return;
+  batch.knownHint = await ctx.storage.readExportHint();
+  batch.hintKnown = true;
+}
+
+async function overStatements(ctx, batch, state) {
   if (typeof ctx.storage.statementLimit !== "function") return null;
+  await rememberHint(ctx, batch);
   const points = batch.points || [];
   const workouts = batch.workouts || [];
   const projected = projectedIngestStatements({
@@ -427,6 +439,8 @@ function overStatements(ctx, batch, state) {
     charge: willCharge(batch, state),
     raw: shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: batch.payload }),
     hint: batch.hint,
+    storedHint: batch.knownHint ?? null,
+    hintKnown: Boolean(batch.hintKnown),
     markOrigin: true,
     prefix: batch.statementPrefix || 0,
   });
@@ -457,6 +471,8 @@ async function insertGroup(ctx, batch, group, index, nowIso, client) {
     workouts: (batch.workouts || []).filter((workout) => set.has(workout.date)),
   }, {
     hint: index === 0 ? batch.hint : undefined,
+    hintKnown: index === 0 ? Boolean(batch.hintKnown) : false,
+    knownHint: index === 0 ? batch.knownHint ?? null : null,
     markOrigin: index === 0 ? (batch.apple ? "apple" : "ingest") : undefined,
     client,
   });
@@ -520,7 +536,7 @@ async function storeIngest(ctx, batch, state = null, claim = null) {
   if (batch.dateCap !== false && dates.length > MAX_INGEST_DATES) {
     return respond(tooManyDatesBody(state?.limits?.maxBytes), 413, clientView(state));
   }
-  const blocked = overStatements(ctx, batch, state);
+  const blocked = await overStatements(ctx, batch, state);
   if (blocked) return blocked;
   if (charge && willKeep && batch.bytes > state.admitRemaining) {
     return overTotal(clientView(state), state.limits.maxBytes);
@@ -666,7 +682,7 @@ async function acceptAppleExport(source, ctx, hint, state = null, { claim = null
       apple: true,
       statementPrefix: countedPrefix(state, claim),
     };
-    const blocked = overStatements(ctx, batch, state);
+    const blocked = await overStatements(ctx, batch, state);
     if (blocked) return blocked;
     if (claim) {
       const limited = await claim();
@@ -689,6 +705,8 @@ async function acceptAppleExport(source, ctx, hint, state = null, { claim = null
  * storage returns null here so the caller can load the row and then cancel.
  */
 function trySyncBackfill(ctx) {
+  // Async stores would run this read, discard the promise, then read again.
+  if (!ctx.storage?.syncReads) return null;
   const read = ctx.storage.readIngestBackfill();
   if (read && typeof read.then === "function") return null;
   const row = read || null;
@@ -776,7 +794,7 @@ async function ingest(req, ctx) {
       if (error.apple) {
         return respond({
           error: "payload_too_large",
-          message: `Body exceeds ${MAX_PAYLOAD_CHARS} bytes. Export a shorter date range.`,
+          message: `Body exceeds ${MAX_PAYLOAD_CHARS} bytes. Run ${APPLE_CHUNK_COMMAND}.`,
         }, 413, clientView(state));
       }
       return tooLarge(state);

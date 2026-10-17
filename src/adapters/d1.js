@@ -3,7 +3,7 @@ import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
 import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, resolveMaxStatements, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { ingestWriteChunks } from "./bulk.js";
-import { migrationFiles } from "./migrate.js";
+import { addedColumn, migrationFiles } from "./migrate.js";
 import {
   D1_BATCH_LIMIT,
   CLOSE_BACKFILL,
@@ -39,7 +39,7 @@ import {
 
 /**
  * Cloudflare D1 adapter. `db` is the binding (`env.DB`).
- * Schema comes from `migrations/` via `wrangler d1 migrations apply`.
+ * Schema comes from `migrations/` via `node src/cli/d1-migrate.js`.
  * Every prepared statement is sent through `db.batch()`. D1 rejects
  * transaction statements, so this adapter never sends those.
  * A documented daily-limit error is rethrown as D1DailyLimitError so the
@@ -196,9 +196,12 @@ export class D1Storage {
     for (const chunk of chunks.guardPoints) statements.push(this.db.prepare(UPSERT_POINTS_JSON).bind(chunk));
     for (const chunk of chunks.insertOnly) statements.push(this.db.prepare(INSERT_WORKOUTS_JSON).bind(chunk));
     for (const chunk of chunks.upserts) statements.push(this.db.prepare(UPSERT_WORKOUTS_JSON).bind(chunk));
-    const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
-    if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());
-    if (action === "set") statements.push(this.db.prepare(UPSERT_HINT).bind(options.hint));
+    if (options.hint !== undefined) {
+      const current = options.hintKnown ? options.knownHint ?? null : await this.readExportHint();
+      const action = hintAction(current, options.hint);
+      if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());
+      if (action === "set") statements.push(this.db.prepare(UPSERT_HINT).bind(options.hint));
+    }
     for (let i = 0; i < statements.length; i += D1_BATCH_LIMIT) {
       const chunk = statements.slice(i, i + D1_BATCH_LIMIT);
       if (chunk.length) await this.run(() => this.db.batch(chunk));
@@ -229,31 +232,82 @@ export class D1Storage {
   }
 }
 
+function quotaRename(statement) {
+  const body = statement.replace(/--[^\n]*/g, "").trim();
+  return /^ALTER\s+TABLE\s+ingest_quota_wide\s+RENAME\s+TO\s+ingest_quota\b/i.test(body);
+}
+
 /**
- * Apply migrations through a D1 binding. An ADD COLUMN whose name is already
- * on the table is skipped, so a database that applied an earlier copy of
- * 0004 can apply 0006.
+ * Statements for one migration file. An ADD COLUMN that is already present
+ * is omitted. If the quota rebuild stopped after the copy, only the rename
+ * remains.
+ */
+async function statementsForD1(db, file) {
+  const statements = [];
+  for (const statement of splitStatements(file.sql)) {
+    const column = addedColumn(statement);
+    if (column) {
+      const info = await db.prepare(`PRAGMA table_info(${column.table})`).all();
+      const columns = info?.results || [];
+      if (columns.some((entry) => String(entry.name).toLowerCase() === column.name.toLowerCase())) continue;
+    }
+    statements.push(statement);
+  }
+  if (!statements.some(quotaRename)) return statements;
+  const tables = await db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('ingest_quota', 'ingest_quota_wide')",
+  ).all();
+  const names = new Set((tables?.results || []).map((row) => row.name));
+  if (names.has("ingest_quota_wide") && !names.has("ingest_quota")) {
+    return ["ALTER TABLE ingest_quota_wide RENAME TO ingest_quota"];
+  }
+  if (names.has("ingest_quota_wide")) return ["DROP TABLE ingest_quota_wide", ...statements];
+  return statements;
+}
+
+/**
+ * Apply migrations through a D1 binding. A file recorded in either
+ * schema_migrations or d1_migrations is not run again; the missing table
+ * receives a copy of that id. An ADD COLUMN whose name is already on the
+ * table is skipped, so a database that applied an earlier copy of 0004 can
+ * apply 0006. Each file's statements and its bookkeeping rows are one batch.
+ * Returns the ids whose SQL ran.
  */
 export async function applyD1Migrations(db) {
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
   ]);
-  const existing = await db.prepare("SELECT id FROM schema_migrations").all();
-  const applied = new Set((existing?.results || []).map((row) => row.id));
+  const schemaRows = await db.prepare("SELECT id FROM schema_migrations").all();
+  const wranglerRows = await db.prepare("SELECT name FROM d1_migrations").all();
+  const schema = new Set((schemaRows?.results || []).map((row) => row.id));
+  const wrangler = new Set((wranglerRows?.results || []).map((row) => row.name));
+  const applied = [];
+  const now = new Date().toISOString();
   for (const file of migrationFiles()) {
-    if (applied.has(file.id)) continue;
-    const statements = [];
-    for (const statement of splitStatements(file.sql)) {
-      const body = statement.replace(/--[^\n]*/g, "").trim();
-      const alter = body.match(/^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
-      if (alter) {
-        const info = await db.prepare(`PRAGMA table_info(${alter[1]})`).all();
-        const columns = info?.results || [];
-        if (columns.some((column) => String(column.name).toLowerCase() === alter[2].toLowerCase())) continue;
+    const inSchema = schema.has(file.id);
+    const inWrangler = wrangler.has(file.id);
+    if (inSchema || inWrangler) {
+      const copies = [];
+      if (!inSchema) {
+        copies.push(db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").bind(file.id, now));
+        schema.add(file.id);
       }
-      statements.push(db.prepare(statement));
+      if (!inWrangler) {
+        copies.push(db.prepare("INSERT INTO d1_migrations (name, applied_at) VALUES (?, ?)").bind(file.id, now));
+        wrangler.add(file.id);
+      }
+      if (copies.length) await db.batch(copies);
+      continue;
     }
-    statements.push(db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").bind(file.id, new Date().toISOString()));
+    const statements = [];
+    for (const statement of await statementsForD1(db, file)) statements.push(db.prepare(statement));
+    statements.push(db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").bind(file.id, now));
+    statements.push(db.prepare("INSERT INTO d1_migrations (name, applied_at) VALUES (?, ?)").bind(file.id, now));
     if (statements.length) await db.batch(statements);
+    schema.add(file.id);
+    wrangler.add(file.id);
+    applied.push(file.id);
   }
+  return applied;
 }

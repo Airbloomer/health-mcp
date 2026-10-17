@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
+import { applyD1Migrations } from "../src/adapters/d1.js";
 import { migrationFiles } from "../src/adapters/migrate.js";
 import { createNodeStorage, startServer } from "../src/adapters/node.js";
 import { createPostgresStorageFromPool } from "../src/adapters/postgres.js";
 import { applySqliteMigrations } from "../src/adapters/sqlite.js";
-import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, toPostgres, UPSERT_POINT, WORKOUTS_RANGE } from "../src/adapters/statements.js";
+import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, splitStatements, toPostgres, UPSERT_POINT, WORKOUTS_RANGE } from "../src/adapters/statements.js";
 import { expectedSummary, summaryDate } from "./expected.mjs";
 
 const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
@@ -338,9 +340,14 @@ test("a lock timeout is returned with retry-after", async () => {
   const { MemoryStorage } = await import("../src/core/memory.js");
   const storage = new MemoryStorage();
   storage.insertIngest = async () => {
-    const error = new Error("canceling statement due to statement timeout");
+    const error = new Error("secret-payload");
     error.code = "57014";
     throw error;
+  };
+  const lines = [];
+  const original = console.error;
+  console.error = (...args) => {
+    lines.push(args.map(String).join(" "));
   };
   const server = await startServer({ storage, token: "tok", port: 0, ingestRatePerHour: 0 });
   try {
@@ -355,7 +362,139 @@ test("a lock timeout is returned with retry-after", async () => {
     assert.equal(response.status, 503);
     assert.equal(response.headers.get("retry-after"), "8");
     assert.deepEqual(await response.json(), { error: "unavailable" });
+    const logged = lines.join("\n");
+    assert.match(logged, /57014/);
+    assert.equal(logged.includes("secret-payload"), false);
   } finally {
+    console.error = original;
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("wrangler row parser reads a log prefix and nested results", async () => {
+  const { bindSql, parseMigrateArgs, parseWranglerRows } = await import("../src/cli/d1-migrate.js");
+  const payload = "[{\"success\":true,\"results\":[{\"id\":\"0001_init.sql\"}]}]";
+  const text = "Executing on remote database\n" + payload;
+  assert.deepEqual(parseWranglerRows(text), [{ id: "0001_init.sql" }]);
+  const bracketed = `\u001b[33m[WARNING]\u001b[0m check the log\n[wrangler] ready\n${payload}`;
+  assert.deepEqual(parseWranglerRows(bracketed), [{ id: "0001_init.sql" }]);
+  const nested = JSON.stringify({ result: [{ success: true, results: [{ name: "deadline" }] }] });
+  assert.deepEqual(parseWranglerRows(nested), [{ name: "deadline" }]);
+  assert.throws(() => parseWranglerRows("[{\"success\":false,\"error\":\"nope\"}]"), /failed/);
+  assert.throws(() => parseWranglerRows("[{\"results\":[],\"error\":\"quota exceeded\"}]"), /failed/);
+  assert.equal(bindSql("SELECT '?' WHERE id = ?", ["ok"]), "SELECT '?' WHERE id = 'ok'");
+  assert.equal(bindSql("SELECT 'is this a ?', \"a?b\", ?", [2]), "SELECT 'is this a ?', \"a?b\", 2");
+  assert.throws(() => bindSql("SELECT '?'", ["extra"]), /mismatch/);
+  assert.equal(parseMigrateArgs(["--local"]).remote, false);
+  assert.equal(parseMigrateArgs(["--remote", "--database", "health-mcp"]).remote, true);
+  assert.throws(() => parseMigrateArgs([]), /--remote\|--local/);
+  assert.throws(() => parseMigrateArgs(["--remote", "--local"]), /--remote\|--local/);
+});
+
+test("d1-migrate requires --remote or --local", () => {
+  const result = spawnSync(process.execPath, ["src/cli/d1-migrate.js"], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}`, /--remote\|--local/);
+});
+
+test("a failed quota migration rolls back and the next run applies it", async () => {
+  const { createWranglerD1 } = await import("../src/cli/d1-migrate.js");
+  const db = new Database(":memory:");
+  let failRename = true;
+  const calls = [];
+  const binding = createWranglerD1({
+    database: "health-mcp",
+    remote: false,
+    run({ sql, mode }) {
+      calls.push(mode);
+      const statements = splitStatements(sql);
+      const bodyOf = (statement) => statement.replace(/--[^\n]*/g, "").trim();
+      if (mode === "command" && statements.length === 1 && /^(SELECT|PRAGMA)\b/i.test(bodyOf(statements[0]))) {
+        return JSON.stringify([{ success: true, results: db.prepare(statements[0]).all() }]);
+      }
+      db.exec("BEGIN");
+      try {
+        for (const statement of statements) {
+          if (failRename && /^ALTER\s+TABLE\s+ingest_quota_wide\s+RENAME\s+TO\s+ingest_quota\b/i.test(bodyOf(statement))) {
+            throw new Error("injected");
+          }
+          db.exec(statement);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      return JSON.stringify([{ success: true, results: [] }]);
+    },
+  });
+  await assert.rejects(() => applyD1Migrations(binding), /injected/);
+  assert.equal(calls.includes("file"), true);
+  const quotaSql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ingest_quota'").get().sql;
+  assert.match(quotaSql, /window_start INTEGER/i);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'ingest_quota_wide'").get(), undefined);
+  const names = (table, column) => db.prepare(`SELECT ${column} AS id FROM ${table} ORDER BY id`).all().map((row) => row.id);
+  assert.deepEqual(names("schema_migrations", "id"), names("d1_migrations", "name"));
+  assert.equal(names("schema_migrations", "id").includes("0005_quota_window_bigint.sql"), false);
+
+  failRename = false;
+  await applyD1Migrations(binding);
+  const applied = names("schema_migrations", "id");
+  assert.deepEqual(applied, names("d1_migrations", "name"));
+  assert.equal(applied.includes("0005_quota_window_bigint.sql"), true);
+  assert.equal(applied.includes("0006_ingest_backfill_deadline.sql"), true);
+  assert.equal(applied.length, migrationFiles().length);
+  assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ingest_quota'").get().sql, /BIGINT/i);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'ingest_quota_wide'").get(), undefined);
+  db.close();
+});
+
+test("a copied quota table is renamed on the next run", async () => {
+  const { createWranglerD1 } = await import("../src/cli/d1-migrate.js");
+  const db = new Database(":memory:");
+  let failRename = true;
+  const binding = createWranglerD1({
+    database: "health-mcp",
+    remote: true,
+    run({ sql, mode }) {
+      const statements = splitStatements(sql);
+      const bodyOf = (statement) => statement.replace(/--[^\n]*/g, "").trim();
+      if (mode === "command" && statements.length === 1 && /^(SELECT|PRAGMA)\b/i.test(bodyOf(statements[0]))) {
+        return JSON.stringify([{ success: true, results: db.prepare(statements[0]).all() }]);
+      }
+      db.exec("BEGIN");
+      try {
+        for (const statement of statements) {
+          if (failRename && /^ALTER\s+TABLE\s+ingest_quota_wide\s+RENAME\s+TO\s+ingest_quota\b/i.test(bodyOf(statement))) {
+            throw new Error("injected");
+          }
+          db.exec(statement);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      return JSON.stringify([{ success: true, results: [] }]);
+    },
+  });
+  await assert.rejects(() => applyD1Migrations(binding), /injected/);
+  db.exec(`
+    CREATE TABLE ingest_quota_wide (
+      token_key TEXT NOT NULL,
+      window_start BIGINT NOT NULL,
+      hits INTEGER NOT NULL,
+      PRIMARY KEY (token_key, window_start)
+    )
+  `);
+  db.exec("INSERT INTO ingest_quota_wide (token_key, window_start, hits) SELECT token_key, window_start, hits FROM ingest_quota");
+  db.exec("DROP TABLE ingest_quota");
+  failRename = false;
+  await applyD1Migrations(binding);
+  const names = (table, column) => db.prepare(`SELECT ${column} AS id FROM ${table} ORDER BY id`).all().map((row) => row.id);
+  assert.deepEqual(names("schema_migrations", "id"), names("d1_migrations", "name"));
+  assert.equal(names("schema_migrations", "id").length, migrationFiles().length);
+  assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ingest_quota'").get().sql, /BIGINT/i);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'ingest_quota_wide'").get(), undefined);
+  db.close();
 });

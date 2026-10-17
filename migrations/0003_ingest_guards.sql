@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS ingest_quota (
   PRIMARY KEY (token_key, window_start)
 );
 
--- At most one row. The summary reads it when a recent export looks misconfigured.
+-- id 1 is the summary hint. id 2 and id 3 mark which import wrote rows.
 CREATE TABLE IF NOT EXISTS export_hint (
   id INTEGER NOT NULL PRIMARY KEY,
   hint TEXT NOT NULL
