@@ -9,13 +9,12 @@ import {
   LIST_METRICS,
   METRIC_RANGE,
   POINTS_FOR_DATE,
+  CLAIM_QUOTA,
   READ_HINT,
-  READ_QUOTA,
   splitStatements,
   toPostgres,
   UPSERT_HINT,
   UPSERT_POINT,
-  UPSERT_QUOTA,
   REPLACE_POINT,
   INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
@@ -56,9 +55,10 @@ export function createPostgresStorageFromPool(pool) {
         }
       }
     },
-    async readIngestQuota(tokenKey, windowStart) {
-      const result = await pool.query(toPostgres(READ_QUOTA), [tokenKey, windowStart]);
-      return Number(result.rows[0]?.hits ?? 0);
+    async claimIngestQuota(tokenKey, windowStart, limit) {
+      const result = await pool.query(toPostgres(CLAIM_QUOTA), [tokenKey, windowStart, limit]);
+      const hits = result.rows[0]?.hits;
+      return hits == null ? null : Number(hits);
     },
     async readExportHint() {
       const result = await pool.query(toPostgres(READ_HINT));
@@ -83,7 +83,7 @@ export function createPostgresStorageFromPool(pool) {
       const diff = partitionIngest(batch.points, batch.workouts, stored);
       const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
       const hasRaw = shouldStoreRaw(batch);
-      if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && !options.quota && action === "skip") {
+      if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && action === "skip") {
         return { written: diff.written, unchanged: diff.unchanged };
       }
       const client = await pool.connect();
@@ -111,9 +111,6 @@ export function createPostgresStorageFromPool(pool) {
             workout.duration_min,
             workout.kcal,
           ]);
-        }
-        if (options.quota) {
-          await client.query(toPostgres(UPSERT_QUOTA), [options.quota.tokenKey, options.quota.windowStart]);
         }
         if (action === "clear") await client.query(toPostgres(DELETE_HINT));
         if (action === "set") await client.query(toPostgres(UPSERT_HINT), [options.hint]);

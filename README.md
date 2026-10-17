@@ -197,7 +197,7 @@ A one-time full history belongs on `POST /import/apple-health`, not on the autom
 - **A day is missing or shows up on the wrong date.** Set `HEALTH_TIMEZONE` in `wrangler.toml` to your zone, then run `npx wrangler deploy` again.
 - **Totals look too low.** Send whole days. On the app routes that compare sample counts, a later sync with fewer samples for a day does not replace a fuller one. A Shortcuts daily total sent with the Bearer token replaces the day. See [Data sources](https://github.com/Airbloomer/health-mcp/blob/main/docs/sources.md).
 - **Nothing arrives from the iPhone.** Run the shortcut manually with the phone unlocked, and check the `Authorization` header.
-- **`export_hint` is set on a summary.** A recent Health Auto Export post looked like a full history, or posts arrived too often. Follow [Recommended export settings](#recommended-export-settings).
+- **`export_hint` is set on a summary.** A recent post looked like too much history, or posts arrived too often. Follow [Recommended export settings](#recommended-export-settings). A later accepted post clears it.
 
 ## More documentation
 

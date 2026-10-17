@@ -39,12 +39,12 @@ export const LIST_METRICS =
 export const WORKOUTS_RANGE =
   "SELECT name, start, date, duration_min, kcal FROM workouts WHERE date >= ? AND date <= ? ORDER BY date, start, name";
 
-export const READ_QUOTA =
-  "SELECT hits FROM ingest_quota WHERE token_key = ? AND window_start = ?";
-
-export const UPSERT_QUOTA =
+/** Increment the hour only while it is still under the limit, and return the new count. */
+export const CLAIM_QUOTA =
   "INSERT INTO ingest_quota (token_key, window_start, hits) VALUES (?, ?, 1) " +
-  "ON CONFLICT(token_key, window_start) DO UPDATE SET hits = hits + 1";
+  "ON CONFLICT(token_key, window_start) DO UPDATE SET hits = ingest_quota.hits + 1 " +
+  "WHERE ingest_quota.hits < ? " +
+  "RETURNING hits";
 
 export const READ_HINT = "SELECT hint FROM export_hint WHERE id = 1";
 

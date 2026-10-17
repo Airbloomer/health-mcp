@@ -4,9 +4,10 @@ import fs from "node:fs";
 import { test } from "node:test";
 import { D1Storage } from "../src/adapters/d1.js";
 import { applySqliteMigrations } from "../src/adapters/sqlite.js";
-import { UPSERT_QUOTA } from "../src/adapters/statements.js";
+import { createSqliteStorage } from "../src/adapters/sqlite.js";
+import { CLAIM_QUOTA } from "../src/adapters/statements.js";
 import { handleRequest } from "../src/core/http.js";
-import { EXPORT_HINT, STALE_HINT_AT, partitionIngest } from "../src/core/ingest-guard.js";
+import { EXPORT_HINT, MAX_INGEST_MAX_AGE_DAYS, STALE_HINT_AT, partitionIngest, resolveMaxAgeDays } from "../src/core/ingest-guard.js";
 import { MemoryStorage } from "../src/core/memory.js";
 
 const NOW = new Date("2026-10-16T12:30:00Z");
@@ -462,13 +463,21 @@ function d1FromSqlite(db, writes) {
       return statement(sql);
     },
     async batch(statements) {
+      const out = [];
       db.transaction((list) => {
         for (const stmt of list) {
           if (writes && /^\s*(INSERT|DELETE)/i.test(stmt.sql)) writes.n += 1;
-          db.prepare(stmt.sql).run(...stmt.params);
+          let results = [];
+          try {
+            results = db.prepare(stmt.sql).all(...stmt.params);
+          } catch (error) {
+            if (!/does not return/i.test(String(error?.message))) throw error;
+            db.prepare(stmt.sql).run(...stmt.params);
+          }
+          out.push({ results });
         }
       })(statements);
-      return [];
+      return out;
     },
   };
 }
@@ -503,7 +512,10 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_quota").get().n, 1);
   const quotaSql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ingest_quota'").get().sql;
   assert.match(quotaSql, /token_key/);
-  assert.equal(UPSERT_QUOTA.includes("BEGIN"), false);
+  assert.match(quotaSql, /BIGINT/i);
+  assert.match(CLAIM_QUOTA, /RETURNING hits/);
+  assert.match(CLAIM_QUOTA, /hits < \?/);
+  assert.equal(CLAIM_QUOTA.includes("BEGIN"), false);
   db.close();
 });
 
@@ -526,4 +538,46 @@ test("apple health chunk posts are not rate limited", async () => {
   assert.equal(first.status, 200);
   assert.equal(second.status, 200);
   assert.equal(storage.quota.size, 0);
+});
+
+test("a huge age does not drop today", async () => {
+  assert.equal(resolveMaxAgeDays(200_000_000), MAX_INGEST_MAX_AGE_DAYS);
+  assert.equal(resolveMaxAgeDays(0), 0);
+  assert.equal(resolveMaxAgeDays(-5), 1);
+  const storage = new MemoryStorage();
+  const response = await postIngest(storage, steps("2026-10-16", 4), { ingestMaxAgeDays: 200_000_000 });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.dropped_stale, 0);
+  assert.equal((await storage.queryDaySummary("2026-10-16")).steps, 4);
+});
+
+test("the quota upsert stops at the limit", async () => {
+  const storage = await createSqliteStorage(":memory:");
+  const first = await storage.claimIngestQuota("bearer", 1_700_000_000_000, 2);
+  const second = await storage.claimIngestQuota("bearer", 1_700_000_000_000, 2);
+  const third = await storage.claimIngestQuota("bearer", 1_700_000_000_000, 2);
+  assert.equal(first, 1);
+  assert.equal(second, 2);
+  assert.equal(third, null);
+  await storage.close();
+});
+
+test("an accepted post from another source clears export_hint", async () => {
+  const storage = new MemoryStorage();
+  await postIngest(storage, steps("2026-10-16", 1), { ingestRatePerHour: 1 });
+  const blocked = await postIngest(storage, steps("2026-10-16", 2), { ingestRatePerHour: 1 });
+  assert.equal(blocked.status, 429);
+  assert.equal(storage.exportHint, EXPORT_HINT);
+  assert.doesNotMatch(EXPORT_HINT, /Health Auto Export|JSON version/);
+  const urlToken = "url-token-for-rate-limit-bucket1";
+  const cleared = await handleRequest(request(`/ingest/shortcuts/${urlToken}`, {
+    method: "POST",
+    token: "",
+    body: JSON.stringify({ samples: [{ type: "Steps", value: "9", start: "2026-10-16T09:00:00Z" }] }),
+  }), ctx(storage, { ingestRatePerHour: 1, urlToken }));
+  assert.equal(cleared.status, 200);
+  assert.equal(storage.exportHint, null);
+  const summary = await (await handleRequest(request("/summary?date=2026-10-16"), ctx(storage))).json();
+  assert.equal(summary.export_hint, undefined);
 });
