@@ -22,6 +22,7 @@ export function contextFromEnv(env) {
     ingestBackfillTotalBytes: env?.INGEST_BACKFILL_MAX_TOTAL_BYTES,
     ingestBackfillHours: env?.INGEST_BACKFILL_HOURS,
     ingestMinDate: env?.INGEST_MIN_DATE,
+    ingestMaxStatements: env?.INGEST_MAX_STATEMENTS,
     storage: new D1Storage(env?.DB),
   };
 }

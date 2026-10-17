@@ -4,11 +4,14 @@ import { authed } from "./auth.js";
 import { hcWebhookError, isHcWebhook, parseHcWebhook } from "./hc-webhook.js";
 import { healthExportProError, parseHealthExportPro } from "./health-export-pro.js";
 import {
+  DEFAULT_INGEST_BACKFILL_HOURS,
   MAX_INGEST_DATES,
+  byteShares,
   dateGroups,
   exportHint,
   activeIngestLimits,
   backfillClosesAt,
+  backfillLimits,
   backfillStatus,
   backfillTotalBody,
   beforeMinDateBody,
@@ -16,14 +19,17 @@ import {
   hourWindowStart,
   outsideWindowBody,
   payloadTooLargeBody,
+  projectedIngestStatements,
   rateLimitedBody,
   resolveBackfillMaxBytes,
   resolveMaxAgeDays,
   resolveMaxBodyBytes,
+  resolveMaxStatements,
   resolveMinDate,
   secondsUntilNextHour,
   STALE_HINT_AT,
   tooManyDatesBody,
+  tooManyStatementsBody,
 } from "./ingest-guard.js";
 import { isLifeDashboard, lifeDashboardError, parseLifeDashboard } from "./life-dashboard.js";
 import { declaredContentLength, handleMcp, MCP_SERVER_NAME } from "./mcp.js";
@@ -153,6 +159,19 @@ function utf8ByteLength(text) {
 export async function syncIngestBackfill(ctx) {
   const now = requestNow(ctx);
   let row = await ctx.storage.readIngestBackfill();
+  // Stored rows with no window row are already closed. Do not treat that
+  // database as a fresh import.
+  if (!row && await ctx.storage.hasStoredData()) {
+    const closedAt = now.toISOString();
+    row = await ctx.storage.finishIngestBackfill({
+      openedAt: closedAt,
+      closedAt,
+      addBytes: 0,
+      addDays: 0,
+      deadline: closedAt,
+      totalBytes: 0,
+    });
+  }
   const preview = activeIngestLimits(row, ctx, now);
   if (row && row.closed_at == null && !preview.view.open) {
     const deadline = Date.parse(preview.view.closes_at);
@@ -373,17 +392,139 @@ async function rejectReserve(ctx, state) {
   return overTotal(view, state.limits.maxBytes);
 }
 
+function reserveDeadline(state, nowIso) {
+  if (state.row?.opened_at) return backfillClosesAt(state.row.opened_at, DEFAULT_INGEST_BACKFILL_HOURS);
+  return backfillClosesAt(nowIso, state.limits.hours);
+}
+
+/**
+ * Project the whole request, including each group's reservation and release,
+ * and refuse it before any write when it is over the statement budget.
+ */
+function overStatements(ctx, batch, state) {
+  const points = batch.points || [];
+  const workouts = batch.workouts || [];
+  const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])]
+    .filter((date) => date != null && date !== "");
+  const groups = dateGroups(dates, MAX_INGEST_DATES);
+  if (groups.length === 0) return null;
+  const pointDates = new Set(points.map((point) => point.date));
+  const workoutDates = new Set(workouts.map((workout) => workout.date));
+  let pointGroups = 0;
+  let workoutGroups = 0;
+  for (const group of groups) {
+    if (group.some((date) => pointDates.has(date))) pointGroups += 1;
+    if (group.some((date) => workoutDates.has(date))) workoutGroups += 1;
+  }
+  const projected = projectedIngestStatements({
+    groups: groups.length,
+    pointGroups,
+    workoutGroups,
+    raw: shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: batch.payload }) ? 1 : 0,
+    hint: typeof batch.hint === "string" && batch.hint.length > 0 ? 1 : 0,
+    prefix: batch.statementPrefix || 0,
+  });
+  if (projected <= resolveMaxStatements(ctx.ingestMaxStatements)) return null;
+  const maxBytes = state?.limits?.maxBytes ?? resolveBackfillMaxBytes(ctx.ingestBackfillMaxBytes);
+  return respond(tooManyStatementsBody(maxBytes), 413, clientView(state));
+}
+
+function overImportTotal(ctx, batch, state) {
+  if (batch.window !== false) return null;
+  const limits = state?.limits || backfillLimits(ctx);
+  if (batch.bytes > limits.totalBytes) return overTotal(clientView(state), limits.maxBytes);
+  if (state?.view?.open && batch.bytes > state.admitRemaining) return overTotal(clientView(state), limits.maxBytes);
+  return null;
+}
+
+function reserveRejected() {
+  const error = new Error("reserve rejected");
+  error.code = "RESERVE_REJECTED";
+  return error;
+}
+
+async function insertGroup(ctx, batch, group, index, nowIso, client) {
+  const set = new Set(group);
+  const key = group[group.length - 1];
+  const groupId = `${key}/${nowIso}/${crypto.randomUUID().slice(0, 8)}`;
+  const storeRaw = index === 0 && shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: batch.payload });
+  const counts = await ctx.storage.insertIngest({
+    id: groupId,
+    date: key,
+    receivedAt: nowIso,
+    bytes: index === 0 ? batch.bytes : 0,
+    payload: storeRaw ? batch.payload : null,
+    storeRaw,
+    points: (batch.points || []).filter((point) => set.has(point.date)),
+    workouts: (batch.workouts || []).filter((workout) => set.has(workout.date)),
+  }, { hint: index === 0 ? batch.hint : undefined, client });
+  return { groupId, counts };
+}
+
+async function chargeGroups(ctx, batch, state, groups, dates, now, client) {
+  const shares = byteShares(batch.bytes, groups.length);
+  const nowIso = now.toISOString();
+  let reserved = null;
+  let written = 0;
+  let unchanged = 0;
+  let id = null;
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    const set = new Set(group);
+    const closeAt = state.done && index === groups.length - 1 ? nowIso : null;
+    let inserted = null;
+    const row = await ctx.storage.reserveIngestBackfill({
+      openedAt: nowIso,
+      closeAt,
+      addBytes: shares[index],
+      totalBytes: state.limits.totalBytes,
+      deadline: reserveDeadline(state, nowIso),
+      nowIso,
+      points: (batch.points || []).filter((point) => set.has(point.date)),
+      workouts: (batch.workouts || []).filter((workout) => set.has(workout.date)),
+      client,
+      write: async () => {
+        inserted = await insertGroup(ctx, batch, group, index, nowIso, client);
+      },
+    });
+    if (!row || !inserted) throw reserveRejected();
+    if (index === 0) id = inserted.groupId;
+    reserved = row;
+    written += inserted.counts?.written ?? 0;
+    unchanged += inserted.counts?.unchanged ?? 0;
+  }
+  return {
+    reserved,
+    body: {
+      ok: true,
+      id,
+      dates,
+      points: batch.samples,
+      workouts: (batch.workouts || []).length,
+      written,
+      unchanged,
+      ...batch.extra,
+    },
+  };
+}
+
 async function storeIngest(ctx, batch, state = null) {
   const points = batch.points || [];
   const workouts = batch.workouts || [];
   const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])].sort();
   const willKeep = points.length + workouts.length > 0;
+  const mayOpen = batch.window !== false;
   const relaxed = Boolean(state && (state.view.open || state.pending));
+  const charge = Boolean(state && (state.view.open || (mayOpen && state.pending)));
   if (batch.dateCap !== false && dates.length > MAX_INGEST_DATES) {
     return respond(tooManyDatesBody(state?.limits?.maxBytes), 413, clientView(state));
   }
+  const blocked = overStatements(ctx, batch, state) || overImportTotal(ctx, batch, state);
+  if (blocked) return blocked;
 
-  const perform = async () => {
+  const now = state?.now || requestNow(ctx);
+  const groups = dateGroups(dates, MAX_INGEST_DATES);
+  const perform = async (client = null) => {
     if (!willKeep) {
       return {
         ok: true,
@@ -396,29 +537,15 @@ async function storeIngest(ctx, batch, state = null) {
         ...batch.extra,
       };
     }
-    const now = state?.now || requestNow(ctx);
-    const groups = dateGroups(dates, MAX_INGEST_DATES);
+    const nowIso = now.toISOString();
     let written = 0;
     let unchanged = 0;
     let id = null;
     for (let index = 0; index < groups.length; index += 1) {
-      const group = new Set(groups[index]);
-      const key = groups[index][groups[index].length - 1];
-      const groupId = `${key}/${now.toISOString()}/${crypto.randomUUID().slice(0, 8)}`;
-      if (index === 0) id = groupId;
-      const storeRaw = index === 0 && shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: batch.payload });
-      const counts = await ctx.storage.insertIngest({
-        id: groupId,
-        date: key,
-        receivedAt: now.toISOString(),
-        bytes: index === 0 ? batch.bytes : 0,
-        payload: storeRaw ? batch.payload : null,
-        storeRaw,
-        points: points.filter((point) => group.has(point.date)),
-        workouts: workouts.filter((workout) => group.has(workout.date)),
-      }, { hint: index === 0 ? batch.hint : undefined });
-      written += counts?.written ?? 0;
-      unchanged += counts?.unchanged ?? 0;
+      const inserted = await insertGroup(ctx, batch, groups[index], index, nowIso, client);
+      if (index === 0) id = inserted.groupId;
+      written += inserted.counts?.written ?? 0;
+      unchanged += inserted.counts?.unchanged ?? 0;
     }
     return {
       ok: true,
@@ -445,27 +572,17 @@ async function storeIngest(ctx, batch, state = null) {
     return respond(await perform(), 200, backfillStatus(row, state.limits, state.now));
   }
 
-  if (relaxed && willKeep) {
+  if (charge && willKeep) {
     if (batch.bytes > state.admitRemaining) return overTotal(clientView(state), state.limits.maxBytes);
-    const nowIso = state.now.toISOString();
-    const fillsNewRow = !state.row && batch.bytes >= state.limits.totalBytes;
-    const closeAt = state.done || fillsNewRow ? nowIso : null;
-    let body;
-    const reserved = await ctx.storage.reserveIngestBackfill({
-      openedAt: nowIso,
-      closeAt,
-      addBytes: batch.bytes,
-      totalBytes: state.limits.totalBytes,
-      deadline: backfillClosesAt(nowIso, state.limits.hours),
-      nowIso,
-      points,
-      workouts,
-      write: async () => {
-        body = await perform();
-      },
-    });
-    if (!reserved || !body) return rejectReserve(ctx, state);
-    return respond(body, 200, backfillStatus(reserved, state.limits, state.now));
+    try {
+      const outcome = typeof ctx.storage.withIngestTransaction === "function"
+        ? await ctx.storage.withIngestTransaction((client) => chargeGroups(ctx, batch, state, groups, dates, now, client))
+        : await chargeGroups(ctx, batch, state, groups, dates, now, null);
+      return respond(outcome.body, 200, backfillStatus(outcome.reserved, state.limits, state.now));
+    } catch (error) {
+      if (error?.code === "RESERVE_REJECTED") return rejectReserve(ctx, state);
+      throw error;
+    }
   }
 
   return respond(await perform(), 200, clientView(state));
@@ -496,22 +613,57 @@ async function* limitBytes(stream, limit) {
   }
 }
 
-async function acceptAppleExport(source, ctx, hint, state = null) {
+function dropBeforeMinDate(points, workouts, minDate) {
+  const keptPoints = [];
+  const keptWorkouts = [];
+  let dropped = 0;
+  for (const point of points || []) {
+    if (point.date < minDate) dropped += 1;
+    else keptPoints.push(point);
+  }
+  for (const workout of workouts || []) {
+    if (workout.date < minDate) dropped += 1;
+    else keptWorkouts.push(workout);
+  }
+  return { points: keptPoints, workouts: keptWorkouts, dropped };
+}
+
+/**
+ * Apple Health import is a history path: it does not apply the recent-day
+ * filter, and it does not open or close the import window. It still drops
+ * dates before INGEST_MIN_DATE and still applies the body cap, the import
+ * total, and the statement budget.
+ */
+async function acceptAppleExport(source, ctx, hint, state = null, { statementPrefix = 0, claim = null } = {}) {
   try {
     const parsed = await parseAppleExport(source, {
       timeZone: resolveTimeZone(ctx.timeZone),
       allow: storedMetricSet(ctx.metricAllowlist),
       sourcePriority: ctx.sourcePriority,
     });
-    return storeIngest(ctx, {
-      points: parsed.points,
-      workouts: parsed.workouts,
+    const minDate = resolveMinDate(ctx.ingestMinDate, { now: state?.now || requestNow(ctx) });
+    const filtered = dropBeforeMinDate(parsed.points, parsed.workouts, minDate);
+    if (filtered.points.length + filtered.workouts.length === 0 && filtered.dropped > 0) {
+      return respond(beforeMinDateBody(minDate), 422, clientView(state));
+    }
+    const batch = {
+      points: filtered.points,
+      workouts: filtered.workouts,
       samples: parsed.samples,
       bytes: parsed.bytes,
       payload: null,
       hint,
       dateCap: false,
-    }, state);
+      window: false,
+      statementPrefix,
+    };
+    const blocked = overStatements(ctx, batch, state) || overImportTotal(ctx, batch, state);
+    if (blocked) return blocked;
+    if (claim) {
+      const limited = await claim();
+      if (limited) return limited;
+    }
+    return storeIngest(ctx, batch, state);
   } catch (error) {
     if (error?.code === "PAYLOAD_TOO_LARGE") {
       return state ? tooLarge(state) : json({ error: "payload_too_large" }, 413);
@@ -531,6 +683,11 @@ function trySyncBackfill(ctx) {
   const read = ctx.storage.readIngestBackfill();
   if (read && typeof read.then === "function") return null;
   const row = read || null;
+  if (!row && typeof ctx.storage.hasStoredData === "function") {
+    const stored = ctx.storage.hasStoredData();
+    if (stored && typeof stored.then === "function") return null;
+    if (stored) return null;
+  }
   const now = requestNow(ctx);
   const active = activeIngestLimits(row, ctx, now);
   if (row && row.closed_at == null && !active.view.open) return null;
@@ -616,9 +773,14 @@ async function ingest(req, ctx) {
     }
     throw error;
   }
+  if (appleBytes) {
+    return acceptAppleExport(appleBytes, ctx, null, state, {
+      statementPrefix: 3,
+      claim: () => claimQuota(req, ctx, state),
+    });
+  }
   const limited = await claimQuota(req, ctx, state);
   if (limited) return limited;
-  if (appleBytes) return acceptAppleExport(appleBytes, ctx, null, state);
   let body;
   try {
     body = JSON.parse(text);
@@ -804,6 +966,7 @@ async function ingestShortcuts(req, ctx) {
     payload: shouldStoreRaw({ storeRaw: ctx.storeRaw, payload: text }) ? text : null,
     extra: { dropped: parsed.points.length - kept.length },
     hint: null,
+    statementPrefix: 3,
   }, state);
 }
 
@@ -854,6 +1017,7 @@ async function storeParsed(req, ctx, parsed, text, state, { recency = false, byt
     payload,
     extra,
     hint,
+    statementPrefix: 3,
   }, state);
 }
 
@@ -861,7 +1025,8 @@ async function importApple(req, ctx) {
   const declared = declaredContentLength(req.headers.get("content-length"));
   if (declared != null && declared > MAX_APPLE_EXPORT_BYTES) return json({ error: "payload_too_large" }, 413);
   if (!req.body) return json({ error: "invalid_payload" }, 400);
-  return acceptAppleExport(limitBytes(req.body, MAX_APPLE_EXPORT_BYTES), ctx);
+  const state = await syncIngestBackfill(ctx);
+  return acceptAppleExport(limitBytes(req.body, MAX_APPLE_EXPORT_BYTES), ctx, null, state, { statementPrefix: 0 });
 }
 
 async function importAppleChunk(req, ctx) {
@@ -880,10 +1045,29 @@ async function importAppleChunk(req, ctx) {
   }
   if (appleChunkError(body)) return json({ error: "invalid_payload" }, 400);
   const allow = storedMetricSet(ctx.metricAllowlist);
-  const points = (body.points || []).filter((point) => allow.has(point.metric));
-  const workouts = body.workouts || [];
+  const state = await syncIngestBackfill(ctx);
+  const minDate = resolveMinDate(ctx.ingestMinDate, { now: state.now });
+  const filtered = dropBeforeMinDate(
+    (body.points || []).filter((point) => allow.has(point.metric)),
+    body.workouts || [],
+    minDate,
+  );
+  if (filtered.points.length + filtered.workouts.length === 0 && filtered.dropped > 0) {
+    return respond(beforeMinDateBody(minDate), 422, clientView(state));
+  }
+  const points = filtered.points;
+  const workouts = filtered.workouts;
   const samples = points.reduce((sum, point) => sum + point.n, 0);
-  return storeIngest(ctx, { points, workouts, samples, bytes: utf8ByteLength(text), payload: null, dateCap: false });
+  return storeIngest(ctx, {
+    points,
+    workouts,
+    samples,
+    bytes: utf8ByteLength(text),
+    payload: null,
+    dateCap: false,
+    window: false,
+    statementPrefix: 0,
+  }, state);
 }
 
 async function summary(url, storage) {

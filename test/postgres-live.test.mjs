@@ -133,3 +133,138 @@ test("postgres rolls back a reservation when the write fails", { skip: url ? fal
     await pool.end();
   }
 });
+
+function shiftDate(iso, days) {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+async function reset(pool) {
+  await pool.query("DELETE FROM ingest_quota");
+  await pool.query("DELETE FROM export_hint");
+  await pool.query("DELETE FROM points_daily");
+  await pool.query("DELETE FROM workouts");
+  await pool.query("DELETE FROM raw_payloads");
+  await pool.query("DELETE FROM ingest_backfill");
+}
+
+test("postgres finishes concurrent posts above the pool size", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
+  async function burst(max, count) {
+    const pool = new pg.Pool({ connectionString: url, max });
+    const storage = createPostgresStorageFromPool(pool);
+    try {
+      await storage.migrate();
+      await reset(pool);
+      const requests = Array.from({ length: count }, (_, index) => {
+        const date = shiftDate("2015-01-01", index);
+        const body = JSON.stringify({
+          data: {
+            metrics: [{ name: "step_count", units: "count", data: [{ date: `${date} 09:00:00 +0000`, qty: 1 }] }],
+          },
+        });
+        return handleRequest(request(body), {
+          storage,
+          token: "tok",
+          timeZone: "UTC",
+          now: NOW,
+          ingestRatePerHour: 0,
+          ingestBackfillTotalBytes: 500_000_000,
+        });
+      });
+      const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`timed out pool ${max}`)), 12_000);
+      });
+      const responses = await Promise.race([Promise.all(requests), timeout]);
+      assert.equal(responses.length, count);
+      for (const response of responses) {
+        assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+      }
+    } finally {
+      await pool.end();
+    }
+  }
+  await burst(10, 12);
+  await burst(3, 6);
+});
+
+test("postgres rolls back every group when a later group fails", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
+  const pool = new pg.Pool({ connectionString: url, max: 4 });
+  const storage = createPostgresStorageFromPool(pool);
+  try {
+    await storage.migrate();
+    await reset(pool);
+    const opener = JSON.stringify({
+      data: {
+        metrics: [{ name: "step_count", units: "count", data: [{ date: "2026-10-16 09:00:00 +0000", qty: 1 }] }],
+      },
+    });
+    const opened = await handleRequest(request(opener), {
+      storage,
+      token: "tok",
+      timeZone: "UTC",
+      now: NOW,
+      ingestRatePerHour: 0,
+    });
+    assert.equal(opened.status, 200, JSON.stringify(await opened.clone().json()));
+    const before = await pool.query("SELECT bytes FROM ingest_backfill");
+    const original = storage.insertIngest.bind(storage);
+    for (const failAt of [2, 3]) {
+      await pool.query("DELETE FROM points_daily WHERE date < '2026-01-01'");
+      let seen = 0;
+      storage.insertIngest = async (batch, options) => {
+        if (String(batch.date) < "2020-01-01") {
+          seen += 1;
+          if (seen === failAt) throw new Error("injected");
+        }
+        return original(batch, options);
+      };
+      const points = [];
+      for (let index = 0; index < 366 * 2 + 1; index += 1) {
+        const date = shiftDate("2010-01-01", index);
+        points.push({
+          metric: "step_count",
+          date,
+          sum_qty: 1,
+          last_qty: 1,
+          last_ts: `${date} 09:00:00 +0000`,
+          units: "count",
+          n: 1,
+        });
+      }
+      await assert.rejects(() => handleRequest(new Request("http://localhost/import/apple-health/chunk", {
+        method: "POST",
+        headers: { authorization: "Bearer tok", "content-type": "application/json" },
+        body: JSON.stringify({ points, workouts: [] }),
+      }), {
+        storage,
+        token: "tok",
+        timeZone: "UTC",
+        now: NOW,
+        ingestRatePerHour: 0,
+      }), /injected/);
+      const pointsLeft = await pool.query("SELECT COUNT(*)::int AS n FROM points_daily");
+      const row = await pool.query("SELECT bytes FROM ingest_backfill");
+      assert.equal(pointsLeft.rows[0].n, 1, `group ${failAt}`);
+      assert.equal(Number(row.rows[0].bytes), Number(before.rows[0].bytes), `group ${failAt}`);
+      seen = 0;
+    }
+  } finally {
+    await pool.end();
+  }
+});
+
+test("migration 0006 can be applied again on postgres", { skip: url ? false : "HEALTH_POSTGRES_URL is unset" }, async () => {
+  const pool = new pg.Pool({ connectionString: url });
+  const storage = createPostgresStorageFromPool(pool);
+  try {
+    await storage.migrate();
+    await pool.query("DELETE FROM schema_migrations WHERE id = $1", ["0006_ingest_backfill_deadline.sql"]);
+    await storage.migrate();
+    const columns = await pool.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'ingest_backfill' AND column_name IN ('deadline', 'total_bytes')",
+    );
+    assert.equal(columns.rows.length, 2);
+  } finally {
+    await pool.end();
+  }
+});

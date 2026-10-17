@@ -10,9 +10,9 @@ import { D1Storage } from "../src/adapters/d1.js";
 import { migrationFiles } from "../src/adapters/migrate.js";
 import { startServer } from "../src/adapters/node.js";
 import { applySqliteMigrations, createSqliteStorage } from "../src/adapters/sqlite.js";
-import { RESERVE_BACKFILL } from "../src/adapters/statements.js";
+import { RESERVE_BACKFILL, splitStatements } from "../src/adapters/statements.js";
 import { handleRequest } from "../src/core/http.js";
-import { EXPORT_HINT, MAX_INGEST_DATES, resolveMinDate } from "../src/core/ingest-guard.js";
+import { EXPORT_HINT, MAX_INGEST_DATES, byteShares, projectedIngestStatements, resolveMinDate } from "../src/core/ingest-guard.js";
 import { MemoryStorage } from "../src/core/memory.js";
 
 const NOW = new Date("2026-10-16T12:30:00Z");
@@ -537,6 +537,15 @@ test("an unauthenticated request is rejected before the window or the body is re
     assert.equal(reads, 0);
 
     const chunked = await new Promise((resolve, reject) => {
+      let settled = false;
+      let timer;
+      const finish = (value, failed = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (failed) reject(value);
+        else resolve(value);
+      };
       const req = http.request({
         hostname: "127.0.0.1",
         port,
@@ -546,20 +555,17 @@ test("an unauthenticated request is rejected before the window or the body is re
       }, (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+        res.on("end", () => finish({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
       });
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         req.destroy();
-        reject(new Error("timed out"));
+        finish(new Error("timed out"), true);
       }, 2000);
-      req.on("error", () => {
-        clearTimeout(timer);
-        resolve({ status: 0, body: "" });
-      });
+      req.on("error", (error) => finish(error, true));
       req.write("{\"data\":");
     });
-    assert.ok(chunked.status === 401 || chunked.status === 0);
-    if (chunked.status === 401) assert.equal(JSON.parse(chunked.body).error, "unauthorized");
+    assert.equal(chunked.status, 401);
+    assert.deepEqual(JSON.parse(chunked.body), { error: "unauthorized" });
     assert.equal(reads, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -607,18 +613,31 @@ test("an Apple import longer than 366 days is stored in bounded batches", async 
       request(JSON.stringify(steps("2005-01-01"))),
       ctx(storage),
     );
-    assert.equal(follow.status, 200, JSON.stringify(await follow.clone().json()));
-    assert.equal((await follow.json()).backfill.open, true);
+    assert.equal(follow.status, 422, JSON.stringify(await follow.clone().json()));
+    assert.equal((await follow.json()).backfill.open, false);
+    const today = await handleRequest(
+      request(JSON.stringify(steps("2026-10-16"))),
+      ctx(storage),
+    );
+    assert.equal(today.status, 200, JSON.stringify(await today.clone().json()));
+    assert.equal((await today.json()).backfill.open, false);
     db.close();
   }
 });
 
 test("an Apple export on ingest and a chunk over 366 dates are not date-capped", async () => {
+  const storage = new MemoryStorage();
   const xml = await handleRequest(
     request(appleSteps(400), { "content-type": "text/xml" }),
-    ctx(new MemoryStorage()),
+    ctx(storage),
   );
   assert.equal(xml.status, 200, JSON.stringify(await xml.clone().json()));
+  assert.equal((await xml.json()).backfill.open, false);
+  assert.equal(storage.backfill, null);
+  const sealed = await handleRequest(request(JSON.stringify(steps("2026-10-16"))), ctx(storage));
+  assert.equal(sealed.status, 200, JSON.stringify(await sealed.clone().json()));
+  assert.equal((await sealed.json()).backfill.open, false);
+  assert.ok(storage.backfill.closed_at);
   const points = [];
   for (let index = 0; index < 400; index += 1) {
     const date = shiftDate("2012-01-01", index);
@@ -638,7 +657,9 @@ test("an Apple export on ingest and a chunk over 366 dates are not date-capped",
     body: JSON.stringify({ points, workouts: [] }),
   }), ctx(new MemoryStorage()));
   assert.equal(chunk.status, 200, JSON.stringify(await chunk.clone().json()));
-  assert.equal((await chunk.json()).points, 400);
+  const chunkBody = await chunk.json();
+  assert.equal(chunkBody.points, 400);
+  assert.equal(chunkBody.backfill.open, false);
 });
 
 test("an empty body with raw storage on does not write a row or close the window", async () => {
@@ -678,6 +699,8 @@ test("the minimum date is clamped and invalid values use the default", async () 
   assert.equal(resolveMinDate("2026-02-31", { now: NOW, timeZone: "UTC" }), "2000-01-01");
   assert.equal(resolveMinDate("2026-13-45", { now: NOW, timeZone: "UTC" }), "2000-01-01");
   assert.equal(resolveMinDate("2015-06-01", { now: NOW, timeZone: "UTC" }), "2015-06-01");
+  const losAngeles = new Date("2026-10-17T02:00:00Z");
+  assert.equal(resolveMinDate("2026-10-17", { now: losAngeles, timeZone: "America/Los_Angeles" }), "2026-10-17");
 
   const early = new MemoryStorage();
   const admitted = await handleRequest(
@@ -714,7 +737,7 @@ test("a sparse date list uses the date index", () => {
   db.close();
 });
 
-test("a failed write releases the reservation and a close it caused", async () => {
+test("a failed filling write does not reopen the window", async () => {
   const storage = createSqliteStorage(":memory:");
   const point = {
     date: "2020-01-02",
@@ -752,7 +775,8 @@ test("a failed write releases the reservation and a close it caused", async () =
   }), /write failed/);
   const row = await storage.readIngestBackfill();
   assert.equal(row.bytes, 10);
-  assert.equal(row.closed_at, null);
+  // The filling reservation closed the window. Releasing its bytes must not clear that close.
+  assert.equal(row.closed_at, NOW.toISOString());
   assert.equal(await storage.hasStoredData(), false);
   await storage.close();
 });
@@ -778,4 +802,259 @@ test("a seeded window does not report the placeholder close time", async () => {
   assert.equal(payload.backfill.closes_at, null);
   assert.equal(payload.backfill.bytes_remaining, 0);
   upgrade.close();
+});
+
+test("the projected statement count includes the reservation and the release", () => {
+  assert.equal(projectedIngestStatements({ groups: 10, pointGroups: 10, prefix: 3 }), 53);
+  assert.equal(projectedIngestStatements({ groups: 3, pointGroups: 3, prefix: 3 }), 18);
+  assert.equal(projectedIngestStatements({ groups: 2, pointGroups: 2, prefix: 3 }), 13);
+  assert.equal(projectedIngestStatements({ groups: 3, pointGroups: 3, prefix: 0 }), 15);
+});
+
+test("a 3650-day apple export on ingest is rejected before any write", async () => {
+  const storage = new MemoryStorage();
+  const response = await handleRequest(
+    request(appleSteps(3650), { "content-type": "text/xml" }),
+    ctx(storage),
+  );
+  assert.equal(response.status, 413);
+  const payload = await response.json();
+  assert.equal(payload.error, "payload_too_large");
+  assert.match(payload.message, /POST \/import\/apple-health\/chunk/);
+  assert.equal(storage.points.size, 0);
+  assert.equal(storage.backfill, null);
+  assert.equal(storage.quota.size, 0);
+});
+
+test("an apple import applies the minimum date without opening the window", async () => {
+  const storage = new MemoryStorage();
+  const mixed = `<HealthData><Record type="HKQuantityTypeIdentifierStepCount" unit="count" value="1" startDate="1969-12-31 09:00:00 +0000" endDate="1969-12-31 09:00:00 +0000"/><Record type="HKQuantityTypeIdentifierStepCount" unit="count" value="1" startDate="2010-01-01 09:00:00 +0000" endDate="2010-01-01 09:00:00 +0000"/></HealthData>`;
+  const kept = await handleRequest(
+    request(mixed, { "content-type": "text/xml" }),
+    ctx(storage, { ingestMinDate: "1970-01-01" }),
+  );
+  assert.equal(kept.status, 200, JSON.stringify(await kept.clone().json()));
+  assert.equal(storage.points.size, 1);
+  assert.equal(storage.backfill, null);
+  const early = new MemoryStorage();
+  const only = `<HealthData><Record type="HKQuantityTypeIdentifierStepCount" unit="count" value="1" startDate="1969-12-31 09:00:00 +0000" endDate="1969-12-31 09:00:00 +0000"/></HealthData>`;
+  const rejected = await handleRequest(
+    request(only, { "content-type": "text/xml" }),
+    ctx(early, { ingestMinDate: "1970-01-01" }),
+  );
+  assert.equal(rejected.status, 422);
+  assert.equal(early.points.size, 0);
+  assert.equal(early.backfill, null);
+});
+
+function datedPoints(count, start = "2010-01-01") {
+  const points = [];
+  for (let index = 0; index < count; index += 1) {
+    const date = shiftDate(start, index);
+    points.push({
+      metric: "step_count",
+      date,
+      sum_qty: 1,
+      last_qty: 1,
+      last_ts: `${date} 09:00:00 +0000`,
+      units: "count",
+      n: 1,
+    });
+  }
+  return points;
+}
+
+function failOnChunkGroup(storage, groupNumber) {
+  const original = storage.insertIngest.bind(storage);
+  let seen = 0;
+  storage.insertIngest = async (batch, options) => {
+    if (String(batch.date) < "2020-01-01") {
+      seen += 1;
+      if (seen === groupNumber) throw new Error("injected");
+    }
+    return original(batch, options);
+  };
+}
+
+async function storedSteps(storage) {
+  const rows = await storage.queryMetricRange("step_count", "2010-01-01", "2026-10-16");
+  return rows.length;
+}
+
+test("sqlite and d1 release only the groups that were never stored", async () => {
+  const points = datedPoints(MAX_INGEST_DATES * 2 + 1);
+  const chunk = JSON.stringify({ points, workouts: [] });
+  const shares = byteShares(Buffer.byteLength(chunk), 3);
+  assert.equal(shares.reduce((sum, share) => sum + share, 0), Buffer.byteLength(chunk));
+  const d1db = new Database(":memory:");
+  applySqliteMigrations(d1db);
+  const adapters = [
+    ["memory", new MemoryStorage()],
+    ["sqlite", createSqliteStorage(":memory:")],
+    ["d1", new D1Storage(d1FromSqlite(d1db))],
+  ];
+  try {
+    for (const [label, storage] of adapters) {
+      const opener = JSON.stringify(steps("2026-10-16"));
+      const opened = await handleRequest(request(opener), ctx(storage));
+      assert.equal(opened.status, 200, label);
+      const before = (await storage.readIngestBackfill()).bytes;
+      assert.equal(before, Buffer.byteLength(opener), label);
+      failOnChunkGroup(storage, 2);
+      await assert.rejects(() => handleRequest(new Request("http://localhost/import/apple-health/chunk", {
+        method: "POST",
+        headers: { authorization: "Bearer tok", "content-type": "application/json" },
+        body: chunk,
+      }), ctx(storage)), /injected/);
+      const row = await storage.readIngestBackfill();
+      assert.equal(row.bytes, before + shares[0], `${label} bytes`);
+      assert.equal(row.closed_at, null, label);
+      assert.equal(await storedSteps(storage), 1 + MAX_INGEST_DATES, `${label} rows`);
+    }
+  } finally {
+    await adapters[1][1].close();
+    d1db.close();
+  }
+});
+
+test("a failure on the last group keeps every earlier group", async () => {
+  const points = datedPoints(MAX_INGEST_DATES * 2 + 1);
+  const chunk = JSON.stringify({ points, workouts: [] });
+  const shares = byteShares(Buffer.byteLength(chunk), 3);
+  const d1db = new Database(":memory:");
+  applySqliteMigrations(d1db);
+  const adapters = [
+    ["memory", new MemoryStorage()],
+    ["sqlite", createSqliteStorage(":memory:")],
+    ["d1", new D1Storage(d1FromSqlite(d1db))],
+  ];
+  try {
+    for (const [label, storage] of adapters) {
+      const opener = JSON.stringify(steps("2026-10-16"));
+      const opened = await handleRequest(request(opener), ctx(storage));
+      assert.equal(opened.status, 200, label);
+      const before = (await storage.readIngestBackfill()).bytes;
+      failOnChunkGroup(storage, 3);
+      await assert.rejects(() => handleRequest(new Request("http://localhost/import/apple-health/chunk", {
+        method: "POST",
+        headers: { authorization: "Bearer tok", "content-type": "application/json" },
+        body: chunk,
+      }), ctx(storage)), /injected/);
+      const row = await storage.readIngestBackfill();
+      assert.equal(row.bytes, before + shares[0] + shares[1], `${label} bytes`);
+      assert.equal(row.closed_at, null, label);
+      assert.equal(await storedSteps(storage), 1 + MAX_INGEST_DATES * 2, `${label} rows`);
+    }
+  } finally {
+    await adapters[1][1].close();
+    d1db.close();
+  }
+});
+
+test("a completed import releases nothing", async () => {
+  const points = datedPoints(MAX_INGEST_DATES * 2 + 1);
+  const chunk = JSON.stringify({ points, workouts: [] });
+  const storage = new MemoryStorage();
+  const opener = JSON.stringify(steps("2026-10-16"));
+  assert.equal((await handleRequest(request(opener), ctx(storage))).status, 200);
+  const before = storage.backfill.bytes;
+  const response = await handleRequest(new Request("http://localhost/import/apple-health/chunk", {
+    method: "POST",
+    headers: { authorization: "Bearer tok", "content-type": "application/json" },
+    body: chunk,
+  }), ctx(storage));
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.equal(storage.backfill.bytes, before + Buffer.byteLength(chunk));
+  assert.equal(await storedSteps(storage), 1 + points.length);
+});
+
+test("a failed filling write stays closed when done arrives with it", async () => {
+  for (const storage of [new MemoryStorage(), createSqliteStorage(":memory:")]) {
+    try {
+      const opened = await handleRequest(
+        request(JSON.stringify(exactSize("2020-01-01", 400))),
+        ctx(storage, { ingestBackfillTotalBytes: 1000 }),
+      );
+      assert.equal(opened.status, 200, JSON.stringify(await opened.clone().json()));
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let entered;
+      const enteredPromise = new Promise((resolve) => {
+        entered = resolve;
+      });
+      storage.insertIngest = async () => {
+        entered();
+        await gate;
+        throw new Error("injected");
+      };
+      const filling = handleRequest(
+        request(JSON.stringify(exactSize("2020-06-01", 600))),
+        ctx(storage, { ingestBackfillTotalBytes: 1000 }),
+      );
+      await enteredPromise;
+      const done = handleRequest(
+        request(JSON.stringify({ backfill: "done" })),
+        ctx(storage, { ingestBackfillTotalBytes: 1000 }),
+      );
+      release();
+      await assert.rejects(filling, /injected/);
+      const doneBody = await (await done).json();
+      assert.equal(doneBody.backfill.open, false);
+      const row = await storage.readIngestBackfill();
+      assert.equal(row.bytes, 400);
+      assert.ok(row.closed_at);
+      const june = await storage.queryMetricRange("step_count", "2020-06-01", "2020-06-01");
+      assert.equal(june.length, 0);
+    } finally {
+      if (storage.close) await storage.close();
+    }
+  }
+});
+
+test("a legacy open row takes its deadline from when it opened", async () => {
+  const db = new Database(":memory:");
+  applySqliteMigrations(db);
+  db.prepare(
+    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) VALUES (1, ?, NULL, 0, 0, NULL, 1000000)",
+  ).run("2026-10-16T00:00:00.000Z");
+  const storage = new D1Storage(d1FromSqlite(db));
+  const response = await handleRequest(
+    request(JSON.stringify(steps("2026-10-16"))),
+    ctx(storage, { ingestBackfillHours: 24 }),
+  );
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.equal(db.prepare("SELECT deadline FROM ingest_backfill").get().deadline, "2026-10-19T00:00:00.000Z");
+  db.close();
+});
+
+test("migration 0006 skips columns that are already present", () => {
+  const fresh = new Database(":memory:");
+  applySqliteMigrations(fresh);
+  const names = fresh.prepare("PRAGMA table_info(ingest_backfill)").all().map((column) => column.name);
+  assert.ok(names.includes("deadline"));
+  assert.ok(names.includes("total_bytes"));
+  fresh.close();
+
+  const legacy = new Database(":memory:");
+  legacy.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
+  const mark = legacy.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)");
+  for (const file of migrationFiles()) {
+    if (file.id.startsWith("0006")) continue;
+    for (const statement of splitStatements(file.sql)) legacy.prepare(statement).run();
+    mark.run(file.id, "2026-01-01T00:00:00.000Z");
+  }
+  legacy.exec("ALTER TABLE ingest_backfill ADD COLUMN deadline TEXT");
+  legacy.exec("ALTER TABLE ingest_backfill ADD COLUMN total_bytes BIGINT");
+  legacy.prepare(
+    "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run("2024-01-02", "step_count", 1, 1, "2024-01-02 09:00:00", "count", 1);
+  applySqliteMigrations(legacy);
+  const row = legacy.prepare("SELECT closed_at FROM ingest_backfill WHERE id = 1").get();
+  assert.equal(row.closed_at, "1970-01-01T00:00:00.000Z");
+  legacy.prepare("DELETE FROM schema_migrations WHERE id = ?").run("0006_ingest_backfill_deadline.sql");
+  applySqliteMigrations(legacy);
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 1);
+  legacy.close();
 });

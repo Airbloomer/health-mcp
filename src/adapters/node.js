@@ -27,14 +27,17 @@ export async function createNodeStorage(env = process.env) {
   return createSqliteStorage(filename);
 }
 
-function writeJson(res, status, body) {
+function writeJson(res, status, body, done) {
   const payload = JSON.stringify(body);
-  res.writeHead(status, {
+  const headers = {
     "content-type": "application/json",
     "cache-control": "no-store",
     "content-length": Buffer.byteLength(payload),
-  });
-  res.end(payload);
+  };
+  if (done) headers.connection = "close";
+  res.writeHead(status, headers);
+  if (done) res.end(payload, done);
+  else res.end(payload);
 }
 
 function requestPath(req) {
@@ -128,7 +131,7 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, ingestBackfillMaxBytes, ingestBackfillPerHour, ingestBackfillTotalBytes, ingestBackfillHours, ingestMinDate, now, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, ingestBackfillMaxBytes, ingestBackfillPerHour, ingestBackfillTotalBytes, ingestBackfillHours, ingestMinDate, ingestMaxStatements, now, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
       const context = {
@@ -149,11 +152,11 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         ingestBackfillTotalBytes,
         ingestBackfillHours,
         ingestMinDate,
+        ingestMaxStatements,
         now,
       };
       if (!requestIsAuthed(req, token, urlToken)) {
-        writeJson(res, 401, { error: "unauthorized" });
-        req.destroy();
+        writeJson(res, 401, { error: "unauthorized" }, () => req.destroy());
         return;
       }
       let request;
@@ -241,6 +244,7 @@ if (isMainModule()) {
     ingestBackfillTotalBytes: process.env.INGEST_BACKFILL_MAX_TOTAL_BYTES,
     ingestBackfillHours: process.env.INGEST_BACKFILL_HOURS,
     ingestMinDate: process.env.INGEST_MIN_DATE,
+    ingestMaxStatements: process.env.INGEST_MAX_STATEMENTS,
     port,
     host,
   });

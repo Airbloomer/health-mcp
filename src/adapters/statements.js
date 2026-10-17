@@ -129,17 +129,20 @@ export const RESERVE_BACKFILL =
   "RETURNING opened_at, closed_at, bytes, days, deadline, total_bytes";
 
 /**
- * Undo one reservation. The close is cleared only when it still equals the
- * timestamp this reservation wrote. A bind of NULL does not match.
+ * Subtract the bytes and days for groups that were never stored.
+ * This never clears `closed_at`. A failed write that filled the window
+ * leaves the window closed, which is safer than reopening it.
  */
 export const RELEASE_BACKFILL =
   "UPDATE ingest_backfill SET " +
   "bytes = bytes - ?, " +
-  "days = CASE WHEN days >= ? THEN days - ? ELSE 0 END, " +
-  "closed_at = CASE WHEN closed_at = ? THEN NULL ELSE closed_at END " +
+  "days = CASE WHEN days >= ? THEN days - ? ELSE 0 END " +
   "WHERE id = 1 AND bytes >= ?";
 
-/** Drop a window that this failed request created and then fully released. */
+/**
+ * Drop a window that this failed request created and then fully released.
+ * A closed row is kept, including a close this request caused.
+ */
 export const DELETE_EMPTY_BACKFILL =
   "DELETE FROM ingest_backfill WHERE id = 1 AND bytes = 0 AND days = 0 AND closed_at IS NULL";
 

@@ -5,8 +5,8 @@ import { shouldStoreRaw } from "../core/aggregate.js";
 import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
-import { migrationFiles } from "./migrate.js";
-import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_ON_DATES,
+import { migrationFiles, statementsForSqlite } from "./migrate.js";
+import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_ON_DATES,
   UPSERT_POINTS_JSON, REPLACE_POINTS_JSON, UPSERT_WORKOUTS_JSON, INSERT_WORKOUTS_JSON,
   WORKOUTS_FOR_DATE, WORKOUTS_ON_DATES, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
   READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, HAS_STORED_DATA } from "./statements.js";
@@ -17,7 +17,7 @@ export function applySqliteMigrations(db) {
   const mark = db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)");
   for (const file of migrationFiles()) {
     if (applied.has(file.id)) continue;
-    const statements = splitStatements(file.sql);
+    const statements = statementsForSqlite(db, file.sql);
     const apply = db.transaction(() => {
       for (const statement of statements) db.prepare(statement).run();
       mark.run(file.id, new Date().toISOString());
@@ -118,8 +118,10 @@ export function createSqliteStorage(filename) {
       try {
         if (args.write) await args.write();
       } catch (error) {
-        releaseBackfill.run(args.addBytes, addDays, addDays, reserved.closed_at, args.addBytes);
-        deleteEmptyBackfill.run();
+        // Release only this group's share. Never clear closed_at, and do not
+        // delete a row this reservation closed.
+        releaseBackfill.run(args.addBytes, addDays, addDays, args.addBytes);
+        if (!reserved.closed_at) deleteEmptyBackfill.run();
         throw error;
       }
       return reserved;

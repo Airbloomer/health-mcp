@@ -60,6 +60,16 @@ export const DEFAULT_INGEST_BACKFILL_HOURS = 72;
 /** About a year. Longer values are clamped. */
 export const MAX_INGEST_BACKFILL_HOURS = 24 * 366;
 
+/**
+ * Statements one request may run. The default leaves headroom under a
+ * 50-statement request cap. The projected count includes each group's
+ * reads, reservation, release, and writes, and it is checked before any write.
+ */
+export const DEFAULT_INGEST_MAX_STATEMENTS = 40;
+
+/** Upper bound for a malformed statement budget. */
+export const MAX_INGEST_MAX_STATEMENTS = 10_000;
+
 export const INITIAL_IMPORT_CLOSED = "The initial import window is closed.";
 
 export function byteLabel(maxBytes) {
@@ -141,6 +151,30 @@ export function resolveBackfillHours(value) {
   return resolveAtLeastOne(value, DEFAULT_INGEST_BACKFILL_HOURS, MAX_INGEST_BACKFILL_HOURS);
 }
 
+export function resolveMaxStatements(value) {
+  return resolveAtLeastOne(value, DEFAULT_INGEST_MAX_STATEMENTS, MAX_INGEST_MAX_STATEMENTS);
+}
+
+/**
+ * Whole-request statement projection.
+ * Each group counts two indexed reads, one reservation, and one release,
+ * plus a point write and a workout write when that group has those rows.
+ * `prefix` is the request overhead (window read, stored-data probe, and claim).
+ */
+export function projectedIngestStatements({ groups = 0, pointGroups = 0, workoutGroups = 0, raw = 0, hint = 0, prefix = 0 } = {}) {
+  return prefix + groups * 4 + pointGroups + workoutGroups + raw + hint;
+}
+
+/** Split `total` bytes across `count` groups. The shares add up to `total`. */
+export function byteShares(total, count) {
+  const shares = [];
+  if (count <= 0) return shares;
+  const base = Math.floor(total / count);
+  const extra = total % count;
+  for (let index = 0; index < count; index += 1) shares.push(base + (index < extra ? 1 : 0));
+  return shares;
+}
+
 function isLeapYear(year) {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
@@ -156,14 +190,15 @@ function isRealIsoDate(value) {
 }
 
 /**
- * A real date is clamped to 1970-01-01 through today in `timeZone`.
- * Anything that is not a real calendar day uses the default.
+ * A real date is clamped to 1970-01-01 through today's UTC calendar date.
+ * The configured time zone is not used. Anything that is not a real
+ * calendar day uses the default.
  */
-export function resolveMinDate(value, { now, timeZone } = {}) {
+export function resolveMinDate(value, { now } = {}) {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!isRealIsoDate(trimmed)) return DEFAULT_INGEST_MIN_DATE;
   const today = now instanceof Date && !Number.isNaN(now.getTime())
-    ? localDate(now.toISOString(), timeZone)
+    ? now.toISOString().slice(0, 10)
     : null;
   if (trimmed < INGEST_MIN_DATE_FLOOR) return INGEST_MIN_DATE_FLOOR;
   if (isRealIsoDate(today) && trimmed > today) return today;
@@ -312,6 +347,13 @@ export function tooManyDatesBody(maxBytes) {
   return {
     error: "payload_too_large",
     message: `This request covers more than ${MAX_INGEST_DATES} dates. Send it in chunks of ${MAX_INGEST_DATES} dates or fewer. ${chunkHint(maxBytes)}`,
+  };
+}
+
+export function tooManyStatementsBody(maxBytes) {
+  return {
+    error: "payload_too_large",
+    message: `This request would use too many statements. Split the import with POST /import/apple-health/chunk. ${chunkHint(maxBytes)}`,
   };
 }
 
