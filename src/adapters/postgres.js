@@ -2,7 +2,7 @@ import pg from "pg";
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { ingestWriteChunks } from "./bulk.js";
 import { migrationFiles, statementsForPostgres } from "./migrate.js";
 import {
   DELETE_HINT,
@@ -17,6 +17,10 @@ import {
   READ_BACKFILL,
   READ_HINT,
   RESERVE_BACKFILL,
+  APPLE_MARKER_ID,
+  INGEST_MARKER_ID,
+  MARK_ORIGIN,
+  READ_MARKER,
   SEAL_BACKFILL_IF_MISSING,
   toPostgres,
   UPSERT_HINT,
@@ -69,6 +73,28 @@ async function setLocalTimeouts(client) {
   await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 }
 
+/** Roll back, and return the error when the connection should be discarded. */
+async function rollback(client) {
+  try {
+    await client.query("ROLLBACK");
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+async function finishClient(client, fn) {
+  let discard;
+  try {
+    return await fn();
+  } catch (error) {
+    discard = await rollback(client);
+    throw error;
+  } finally {
+    client.release(discard || undefined);
+  }
+}
+
 /**
  * Storage over a node-postgres pool. Pass a pool in tests; `openPostgres` opens one from a URL.
  */
@@ -80,7 +106,7 @@ export function createPostgresStorageFromPool(pool) {
         const existing = await pool.query("SELECT id FROM schema_migrations WHERE id = $1", [file.id]);
         if (existing.rows.length) continue;
         const client = await pool.connect();
-        try {
+        await finishClient(client, async () => {
           await client.query("BEGIN");
           for (const statement of statementsForPostgres(file.sql)) await client.query(statement);
           await client.query("INSERT INTO schema_migrations (id, applied_at) VALUES ($1, $2)", [
@@ -88,16 +114,7 @@ export function createPostgresStorageFromPool(pool) {
             new Date().toISOString(),
           ]);
           await client.query("COMMIT");
-        } catch (error) {
-          try {
-            await client.query("ROLLBACK");
-          } catch {
-            // The connection may already be unusable.
-          }
-          throw error;
-        } finally {
-          client.release();
-        }
+        });
       }
     },
     query(client, sql, params) {
@@ -119,22 +136,13 @@ export function createPostgresStorageFromPool(pool) {
      */
     async withIngestTransaction(fn) {
       const client = await pool.connect();
-      try {
+      return finishClient(client, async () => {
         await client.query("BEGIN");
         await setLocalTimeouts(client);
         const value = await fn(client);
         await client.query("COMMIT");
         return value;
-      } catch (error) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-          // The connection may already be unusable.
-        }
-        throw error;
-      } finally {
-        client.release();
-      }
+      });
     },
     async loadStored(dates, client = null) {
       const points = [];
@@ -168,36 +176,13 @@ export function createPostgresStorageFromPool(pool) {
         ]);
         return normalizeBackfill(result.rows[0]);
       };
-      // Inside withIngestTransaction the outer ROLLBACK is the full release.
-      // Do not begin again, and do not run a compensating update.
-      if (client) {
-        const reserved = await reserve(client);
-        if (!reserved) return null;
-        if (args.write) await args.write();
-        return reserved;
-      }
-      const held = await pool.connect();
-      try {
-        await held.query("BEGIN");
-        await setLocalTimeouts(held);
-        const reserved = await reserve(held);
-        if (!reserved) {
-          await held.query("ROLLBACK");
-          return null;
-        }
-        if (args.write) await args.write();
-        await held.query("COMMIT");
-        return reserved;
-      } catch (error) {
-        try {
-          await held.query("ROLLBACK");
-        } catch {
-          // The connection may already be unusable.
-        }
-        throw error;
-      } finally {
-        held.release();
-      }
+      // The caller holds the one ingest transaction. A missing client would
+      // check out a second connection for the write.
+      if (!client) throw new Error("reserve requires the ingest transaction");
+      const reserved = await reserve(client);
+      if (!reserved) return null;
+      if (args.write) await args.write();
+      return reserved;
     },
     async sealIngestBackfillIfMissing({ openedAt, closedAt, deadline, totalBytes = 0 }) {
       await pool.query(toPostgres(SEAL_BACKFILL_IF_MISSING), [openedAt, closedAt, 0, 0, deadline || closedAt, totalBytes]);
@@ -242,29 +227,25 @@ export function createPostgresStorageFromPool(pool) {
       const newDays = countNewDays(batch.points, batch.workouts, stored);
       const action = hintAction(options.hint === undefined ? null : await this.readExportHint(client), options.hint);
       const hasRaw = shouldStoreRaw(batch);
-      const replacePoints = diff.points.filter((point) => point.replace);
-      const guardPoints = diff.points.filter((point) => !point.replace);
-      const insertOnly = diff.workouts.filter((workout) => workout.insertOnly);
-      const upserts = diff.workouts.filter((workout) => !workout.insertOnly);
-      if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && action === "skip") {
+      const chunks = ingestWriteChunks(diff.points, diff.workouts);
+      let markerId = null;
+      if (options.markOrigin) {
+        markerId = options.markOrigin === "apple" ? APPLE_MARKER_ID : INGEST_MARKER_ID;
+        const existing = await this.query(client, toPostgres(READ_MARKER), [markerId]);
+        if (existing.rows.length) markerId = null;
+      }
+      if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && action === "skip" && markerId == null) {
         return { written: diff.written, unchanged: diff.unchanged, newDays };
       }
       const write = async (runner) => {
+        if (markerId != null) await runner.query(toPostgres(MARK_ORIGIN), [markerId]);
         if (hasRaw) {
           await runner.query(toPostgres(INSERT_RAW), [batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload]);
         }
-        for (const chunk of jsonChunks(replacePoints.map(pointJson))) {
-          await runner.query(toPostgres(REPLACE_POINTS_JSON), [chunk]);
-        }
-        for (const chunk of jsonChunks(guardPoints.map(pointJson))) {
-          await runner.query(toPostgres(UPSERT_POINTS_JSON), [chunk]);
-        }
-        for (const chunk of jsonChunks(insertOnly.map(workoutJson))) {
-          await runner.query(toPostgres(INSERT_WORKOUTS_JSON), [chunk]);
-        }
-        for (const chunk of jsonChunks(upserts.map(workoutJson))) {
-          await runner.query(toPostgres(UPSERT_WORKOUTS_JSON), [chunk]);
-        }
+        for (const chunk of chunks.replacePoints) await runner.query(toPostgres(REPLACE_POINTS_JSON), [chunk]);
+        for (const chunk of chunks.guardPoints) await runner.query(toPostgres(UPSERT_POINTS_JSON), [chunk]);
+        for (const chunk of chunks.insertOnly) await runner.query(toPostgres(INSERT_WORKOUTS_JSON), [chunk]);
+        for (const chunk of chunks.upserts) await runner.query(toPostgres(UPSERT_WORKOUTS_JSON), [chunk]);
         if (action === "clear") await runner.query(toPostgres(DELETE_HINT));
         if (action === "set") await runner.query(toPostgres(UPSERT_HINT), [options.hint]);
       };
@@ -275,20 +256,11 @@ export function createPostgresStorageFromPool(pool) {
         return { written: diff.written, unchanged: diff.unchanged, newDays };
       }
       const held = await pool.connect();
-      try {
+      await finishClient(held, async () => {
         await held.query("BEGIN");
         await write(held);
         await held.query("COMMIT");
-      } catch (error) {
-        try {
-          await held.query("ROLLBACK");
-        } catch {
-          // The connection may already be unusable.
-        }
-        throw error;
-      } finally {
-        held.release();
-      }
+      });
       return { written: diff.written, unchanged: diff.unchanged, newDays };
     },
     async queryDaySummary(date) {

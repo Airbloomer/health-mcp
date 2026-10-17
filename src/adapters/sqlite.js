@@ -4,12 +4,13 @@ import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { countNewDays, dateGroups, hintAction, MAX_INGEST_DATES, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
-import { jsonChunks, pointJson, workoutJson } from "./bulk.js";
+import { ingestWriteChunks } from "./bulk.js";
 import { migrationFiles, statementsForSqlite } from "./migrate.js";
 import { INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_ON_DATES,
   UPSERT_POINTS_JSON, REPLACE_POINTS_JSON, UPSERT_WORKOUTS_JSON, INSERT_WORKOUTS_JSON,
   WORKOUTS_FOR_DATE, WORKOUTS_ON_DATES, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
-  READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, SEAL_BACKFILL_IF_MISSING, HAS_STORED_DATA } from "./statements.js";
+  READ_BACKFILL, RESERVE_BACKFILL, RELEASE_BACKFILL, DELETE_EMPTY_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, SEAL_BACKFILL_IF_MISSING, HAS_STORED_DATA,
+  APPLE_MARKER_ID, INGEST_MARKER_ID, READ_MARKER, MARK_ORIGIN } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -69,22 +70,25 @@ export function createSqliteStorage(filename) {
     }
     return { points, workouts };
   };
+  const readMarker = db.prepare(READ_MARKER);
+  const markOrigin = db.prepare(MARK_ORIGIN);
   const insertAll = db.transaction((batch, options = {}) => {
     const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
     const stored = loadSpan(dates);
     const diff = partitionIngest(batch.points, batch.workouts, stored);
     const newDays = countNewDays(batch.points, batch.workouts, stored);
+    if (options.markOrigin) {
+      const markerId = options.markOrigin === "apple" ? APPLE_MARKER_ID : INGEST_MARKER_ID;
+      if (!readMarker.get(markerId)) markOrigin.run(markerId);
+    }
     if (shouldStoreRaw(batch)) {
       insertRaw.run(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload);
     }
-    const replacePoints = diff.points.filter((point) => point.replace);
-    const guardPoints = diff.points.filter((point) => !point.replace);
-    for (const chunk of jsonChunks(replacePoints.map(pointJson))) replacePointsJson.run(chunk);
-    for (const chunk of jsonChunks(guardPoints.map(pointJson))) upsertPointsJson.run(chunk);
-    const insertOnly = diff.workouts.filter((workout) => workout.insertOnly);
-    const upserts = diff.workouts.filter((workout) => !workout.insertOnly);
-    for (const chunk of jsonChunks(insertOnly.map(workoutJson))) insertWorkoutsJson.run(chunk);
-    for (const chunk of jsonChunks(upserts.map(workoutJson))) upsertWorkoutsJson.run(chunk);
+    const chunks = ingestWriteChunks(diff.points, diff.workouts);
+    for (const chunk of chunks.replacePoints) replacePointsJson.run(chunk);
+    for (const chunk of chunks.guardPoints) upsertPointsJson.run(chunk);
+    for (const chunk of chunks.insertOnly) insertWorkoutsJson.run(chunk);
+    for (const chunk of chunks.upserts) upsertWorkoutsJson.run(chunk);
     const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
     if (action === "clear") deleteHint.run();
     if (action === "set") upsertHint.run(options.hint);

@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { activeUrlToken, authed, redactRequestTarget } from "../core/auth.js";
 import { handleRequest, syncIngestBackfill } from "../core/http.js";
-import { backfillTotalBody, payloadTooLargeBody } from "../core/ingest-guard.js";
+import { backfillTotalBody, payloadTooLargeBody, retryableDatabaseError } from "../core/ingest-guard.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
 import { openPostgres } from "./postgres.js";
@@ -27,12 +27,13 @@ export async function createNodeStorage(env = process.env) {
   return createSqliteStorage(filename);
 }
 
-function writeJson(res, status, body, done) {
+function writeJson(res, status, body, done, extraHeaders) {
   const payload = JSON.stringify(body);
   const headers = {
     "content-type": "application/json",
     "cache-control": "no-store",
     "content-length": Buffer.byteLength(payload),
+    ...extraHeaders,
   };
   if (done) headers.connection = "close";
   res.writeHead(status, headers);
@@ -172,8 +173,10 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         const state = await syncIngestBackfill(context);
         const declared = declaredByteLength(req);
         const limit = bodyLimit(req, state.byteLimit);
+        const jsonBody = String(req.headers["content-type"] || "").toLowerCase().includes("json");
         if (
-          declared != null
+          jsonBody
+          && declared != null
           && (state.view.open || state.pending)
           && declared > state.admitRemaining
           && declared <= limit
@@ -197,6 +200,11 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
       if (error?.code === "PAYLOAD_TOO_LARGE") {
         writeJson(res, 413, error.detail || { error: "payload_too_large" });
         req.destroy();
+        return;
+      }
+      if (retryableDatabaseError(error)) {
+        if (!res.headersSent) writeJson(res, 503, { error: "unavailable" }, undefined, { "retry-after": "8" });
+        else res.destroy();
         return;
       }
       const message = error instanceof Error ? error.message : error;
