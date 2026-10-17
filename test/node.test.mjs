@@ -16,7 +16,16 @@ const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.u
 
 test("migration SQL stays portable", () => {
   const files = migrationFiles();
-  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql", "0003_ingest_guards.sql", "0004_ingest_backfill.sql"]);
+  assert.deepEqual(files.map((file) => file.id), [
+    "0001_init.sql",
+    "0002_daily_points.sql",
+    "0003_ingest_guards.sql",
+    "0004_ingest_backfill.sql",
+    "0005_quota_window_bigint.sql",
+  ]);
+  assert.match(files[2].sql, /window_start INTEGER NOT NULL/);
+  assert.doesNotMatch(files[2].sql, /BIGINT/);
+  assert.match(files[4].sql, /window_start BIGINT NOT NULL/);
   for (const file of files) {
     assert.doesNotMatch(file.sql, /AUTOINCREMENT|WITHOUT ROWID|INSERT OR REPLACE|PRAGMA/i);
   }
@@ -181,7 +190,6 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
     }
     if (sql === toPostgres(POINTS_FOR_DATE)) {
       pointReads += 1;
-      if (pointReads === 1) return [];
       return [{
         date: summaryDate,
         metric: "step_count",
@@ -250,11 +258,15 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
   assert.deepEqual(summary.workouts, [{ name: "Walk", start: "2026-10-14 12:00:00 -0700", duration_min: 30, kcal: 120 }]);
   const raw = queries.find((query) => query.sql === toPostgres(INSERT_RAW));
   assert.deepEqual(raw.params, ["id", summaryDate, "2026-10-16T00:00:00.000Z", 2, "{}"]);
-  const point = queries.find((query) => query.sql === toPostgres(UPSERT_POINT));
+  const point = queries.find((query) => query.sql.includes("jsonb_to_recordset") && query.sql.includes("points_daily"));
   assert.match(point.sql, /ON CONFLICT\(date, metric\)/);
   assert.match(point.sql, /WHERE excluded\.n >= points_daily\.n/);
   assert.match(point.sql, /points_daily/);
-  assert.deepEqual(point.params, [summaryDate, "step_count", 9321, 9321, "2026-10-14 09:00:00", "count", 1]);
+  const storedPoint = JSON.parse(point.params[0]);
+  assert.equal(storedPoint[0].d, summaryDate);
+  assert.equal(storedPoint[0].m, "step_count");
+  assert.equal(storedPoint[0].s, 9321);
+  assert.equal(storedPoint[0].n, 1);
   assert.equal(queries.some((query) => query.sql === toPostgres(POINTS_FOR_DATE)), true);
   assert.equal(queries.some((query) => query.sql === toPostgres(LIST_METRICS)), true);
   const metricQuery = queries.find((query) => query.sql === toPostgres(METRIC_RANGE));

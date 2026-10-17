@@ -13,8 +13,8 @@ import { expectedSummary, summaryDate } from "./expected.mjs";
 
 function sealBackfill(db) {
   db.prepare(
-    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, ?, ?, 0, 0)",
-  ).run("2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) VALUES (1, ?, ?, 0, 0, ?, 0)",
+  ).run("2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
 }
 
 function fetchAt(request, env) {
@@ -123,7 +123,7 @@ test("cloudflare adapter ingests and summarizes through D1", async () => {
   db.close();
 });
 
-test("cloudflare adapter splits D1 writes into batches of 500", async () => {
+test("cloudflare adapter writes a large day in one D1 batch", async () => {
   const batches = [];
   const db = {
     prepare(sql) {
@@ -162,7 +162,7 @@ test("cloudflare adapter splits D1 writes into batches of 500", async () => {
     points,
     workouts: [],
   });
-  assert.deepEqual(batches, [D1_BATCH_LIMIT, 1]);
+  assert.deepEqual(batches, [2]);
 });
 
 test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
@@ -192,7 +192,8 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   assert.equal(storedMetrics, 7 * (Object.keys(SUM_METRICS).length + Object.keys(LATEST_METRICS).length));
   assert.equal(workouts, 14);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_payloads").get().n, 0);
-  assert.equal(writes.n, storedMetrics + workouts);
+  assert.ok(writes.n < 20, `used ${writes.n} statements`);
+  assert.ok(writes.n < storedMetrics);
 
   const day = await (await fetchAt(
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),

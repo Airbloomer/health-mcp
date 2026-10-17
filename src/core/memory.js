@@ -3,6 +3,11 @@ import { countNewDays, hintAction, partitionIngest, withExportHint } from "./ing
 import { summarizeDay } from "./summary.js";
 
 /**
+ * In-memory storage used by tests and local experiments. It is not persistent:
+ * the process keeps the import window, and a new process starts with no row
+ * and no stored data. The next stored point can open a window. A restart does
+ * not keep a closed window.
+ *
  * In-memory storage used by tests and as the reference for the storage interface.
  *
  * insertIngest({ id, date, receivedAt, bytes, payload, storeRaw, points, workouts })
@@ -25,33 +30,107 @@ export class MemoryStorage {
     this.quota = new Map();
     this.exportHint = null;
     this.backfill = null;
+    this.backfillLock = Promise.resolve();
   }
 
-  async readIngestBackfill() {
+  async withBackfillLock(fn) {
+    const previous = this.backfillLock;
+    let release;
+    this.backfillLock = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  readIngestBackfill() {
     return this.backfill ? { ...this.backfill } : null;
   }
 
-  async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
+  hasStoredData() {
+    return this.points.size > 0 || this.workouts.size > 0 || this.payloads.length > 0;
+  }
+
+  _countDays(points, workouts) {
+    const stored = {
+      points: [...this.points.values()],
+      workouts: [...this.workouts.values()],
+    };
+    return countNewDays(points, workouts, stored);
+  }
+
+  _applyReserve({ openedAt, closeAt = null, addBytes = 0, addDays = 0, totalBytes, deadline, nowIso }) {
     if (!this.backfill) {
+      if (addBytes > totalBytes) return null;
+      const closed = closeAt || (addBytes >= totalBytes ? nowIso : null);
       this.backfill = {
         opened_at: openedAt,
-        closed_at: closeAt,
+        closed_at: closed,
         bytes: addBytes,
         days: addDays,
+        deadline,
+        total_bytes: totalBytes,
       };
       return { ...this.backfill };
     }
-    if (this.backfill.closed_at) return { ...this.backfill };
+    if (this.backfill.closed_at) return null;
+    if (!(nowIso < this.backfill.deadline)) return null;
+    if (this.backfill.bytes + addBytes > this.backfill.total_bytes) return null;
     this.backfill.bytes += addBytes;
     this.backfill.days += addDays;
     if (closeAt) this.backfill.closed_at = closeAt;
+    else if (this.backfill.bytes >= this.backfill.total_bytes) this.backfill.closed_at = nowIso;
     return { ...this.backfill };
   }
 
+  async reserveIngestBackfill(args) {
+    return this.withBackfillLock(async () => {
+      const addDays = this._countDays(args.points, args.workouts);
+      const snapshot = this.backfill ? { ...this.backfill } : null;
+      const row = this._applyReserve({ ...args, addDays });
+      if (!row) return null;
+      try {
+        if (args.write) await args.write();
+      } catch (error) {
+        this.backfill = snapshot;
+        throw error;
+      }
+      return { ...this.backfill };
+    });
+  }
+
+  async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
+    return this.withBackfillLock(async () => {
+      if (!this.backfill) {
+        this.backfill = {
+          opened_at: openedAt,
+          closed_at: closedAt,
+          bytes: addBytes,
+          days: addDays,
+          deadline: deadline || closedAt,
+          total_bytes: totalBytes,
+        };
+        return { ...this.backfill };
+      }
+      if (!this.backfill.closed_at) {
+        this.backfill.closed_at = closedAt;
+        this.backfill.bytes += addBytes;
+        this.backfill.days += addDays;
+      }
+      return { ...this.backfill };
+    });
+  }
+
   async closeIngestBackfill(closedAt) {
-    if (!this.backfill) return null;
-    if (!this.backfill.closed_at) this.backfill.closed_at = closedAt;
-    return { ...this.backfill };
+    return this.withBackfillLock(async () => {
+      if (!this.backfill) return null;
+      if (!this.backfill.closed_at) this.backfill.closed_at = closedAt;
+      return { ...this.backfill };
+    });
   }
 
   async claimIngestQuota(tokenKey, windowStart, limit) {

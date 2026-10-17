@@ -505,7 +505,7 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
 
   const db = new Database(":memory:");
   applySqliteMigrations(db);
-  db.prepare("INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 0, 0)").run();
+  db.prepare("INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) VALUES (1, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 0, 0, '2026-10-01T00:00:00.000Z', 0)").run();
   const writes = { n: 0 };
   const envStorage = new D1Storage(d1FromSqlite(db, writes));
   const quiet = ctx(envStorage, { ingestRatePerHour: 0 });

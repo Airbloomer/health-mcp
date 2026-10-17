@@ -15,7 +15,7 @@ npx wrangler login
 npx wrangler d1 create health-mcp
 ```
 
-Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql` and `0003_ingest_guards.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
+Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, and `0005_quota_window_bigint.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
 
 ```bash
 npx wrangler d1 migrations apply health-mcp --remote
@@ -23,7 +23,7 @@ printf '%s' 'replace-with-a-long-random-token' | npx wrangler secret put HEALTH_
 npx wrangler deploy
 ```
 
-`migrations apply` runs every pending file in order: `0001_init.sql`, then `0002_daily_points.sql`, then `0003_ingest_guards.sql`. Do not deploy until all three have been applied.
+`migrations apply` runs every pending file in order: `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, then `0005_quota_window_bigint.sql`. Do not deploy until all five have been applied. `0004` inserts a closed import-window row when points, workouts, or raw payloads are already stored. A missing row is not an open window.
 
 For local development, apply the same migrations before `wrangler dev`:
 
@@ -96,10 +96,11 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `INGEST_MAX_AGE_DAYS` | no | Wrangler `[vars]`, or the process environment | How many days before today Health Auto Export JSON on `POST /ingest` may include. Default `1` (today and yesterday in `HEALTH_TIMEZONE`). Values above 36500 are clamped to 36500. Older points are dropped and counted as `dropped_stale`. Dates more than one day after today are counted as `dropped_future`. `POST /import/apple-health` ignores this. |
 | `INGEST_MAX_BODY_BYTES` | no | Wrangler `[vars]`, or the process environment | Maximum JSON ingest body in bytes. Default `1000000`. A larger body returns `413` with `payload_too_large`. Capped at 20,000,000. |
 | `INGEST_RATE_LIMIT_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour. Default `6`. `0` disables the limit. Over the limit returns `429` with `Retry-After`. |
-| `INGEST_BACKFILL_HOURS` | no | Wrangler `[vars]`, or the process environment | How long the initial import window stays open after the first accepted ingest. Default `72`. Values below 1 use the default. Values above 8784 are clamped to 8784. |
-| `INGEST_BACKFILL_MAX_BYTES` | no | Wrangler `[vars]`, or the process environment | Per-request JSON body cap while the initial import window is open. Default `25000000`. Clamped to 100000000. |
+| `INGEST_MIN_DATE` | no | Wrangler `[vars]`, or the process environment | Earliest calendar date Health Auto Export JSON on `POST /ingest` may store. Default `2000-01-01`. A value that is not `YYYY-MM-DD` uses the default. |
+| `INGEST_BACKFILL_HOURS` | no | Wrangler `[vars]`, or the process environment | How long the initial import window stays open after the first accepted ingest. Default `72`. Values below 1 use the default. Values above 8784 are clamped to 8784. The deadline is stored on the row when the window opens. |
+| `INGEST_BACKFILL_MAX_BYTES` | no | Wrangler `[vars]`, or the process environment | Per-request JSON body cap while the initial import window is open. Default `5000000`. Clamped to 10000000. Import history in chunks of 5 MB or less. A `content-type` that does not contain `json` keeps the 20,000,000 byte cap. |
 | `INGEST_BACKFILL_MAX_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour while the initial import window is open. Default `60`. Clamped to 10000. |
-| `INGEST_BACKFILL_MAX_TOTAL_BYTES` | no | Wrangler `[vars]`, or the process environment | Total accepted body bytes for the whole initial import window. Default `500000000`. Clamped to 5000000000. |
+| `INGEST_BACKFILL_MAX_TOTAL_BYTES` | no | Wrangler `[vars]`, or the process environment | Total accepted body bytes for the whole initial import window. Default `500000000`. Clamped to 5000000000. The value is stored on the row when the window opens. |
 
 Copy [`.env.example`](../.env.example) to `.env` for Node, or [`dev.vars.example`](../dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
@@ -137,6 +138,8 @@ src/index.js             Wrangler entry
 migrations/0001_init.sql
 migrations/0002_daily_points.sql
 migrations/0003_ingest_guards.sql
+migrations/0004_ingest_backfill.sql
+migrations/0005_quota_window_bigint.sql
 ```
 
-The storage interface is `insertIngest(batch)`, `queryDaySummary(date)`, `queryMetricRange(metric, startDate, endDate)`, `listMetrics()`, and `listWorkouts(startDate, endDate)`. `batch.points` is already one row per `(metric, date)` (`sum_qty`, `last_qty`, `last_ts`, `units`, `n`). `storeRaw: false` skips the raw body. `queryDaySummary` returns the `/summary` object. The three range methods only read. `MemoryStorage` in `src/core/memory.js` is the reference implementation.
+The storage interface is `insertIngest(batch)`, `queryDaySummary(date)`, `queryMetricRange(metric, startDate, endDate)`, `listMetrics()`, and `listWorkouts(startDate, endDate)`. `batch.points` is already one row per `(metric, date)` (`sum_qty`, `last_qty`, `last_ts`, `units`, `n`). `storeRaw: false` skips the raw body. `queryDaySummary` returns the `/summary` object. The three range methods only read. `MemoryStorage` in `src/core/memory.js` is the reference implementation. It is process-local and not persistent: a new process has no import-window row and no stored data, so the next stored point can open a window, and a restart does not keep a closed window.

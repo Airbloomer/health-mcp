@@ -2,23 +2,27 @@ import { shouldStoreRaw } from "../core/aggregate.js";
 import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
 import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
+import { dateSpan, jsonChunks, pointJson, workoutJson } from "./bulk.js";
 import {
   D1_BATCH_LIMIT,
-  ADD_BACKFILL,
   CLOSE_BACKFILL,
   DELETE_HINT,
+  FINISH_BACKFILL,
+  HAS_STORED_DATA,
   INSERT_RAW,
-  READ_BACKFILL,
+  INSERT_WORKOUTS_JSON,
   LIST_METRICS,
   METRIC_RANGE,
+  POINTS_BETWEEN,
   POINTS_FOR_DATE,
+  READ_BACKFILL,
   READ_HINT,
+  REPLACE_POINTS_JSON,
+  RESERVE_BACKFILL,
   CLAIM_QUOTA,
-  REPLACE_POINT,
   UPSERT_HINT,
-  UPSERT_POINT,
-  INSERT_WORKOUT_IF_NEW,
-  UPSERT_WORKOUT,
+  UPSERT_POINTS_JSON,
+  UPSERT_WORKOUTS_JSON,
   WORKOUTS_FOR_DATE,
   WORKOUTS_RANGE,
 } from "./statements.js";
@@ -54,12 +58,12 @@ export class D1Storage {
   }
 
   async loadStored(dates) {
-    const points = [];
-    const workouts = [];
-    for (const date of dates) {
-      points.push(...await this.rowsFor(POINTS_FOR_DATE, date));
-      workouts.push(...await this.rowsFor(WORKOUTS_FOR_DATE, date));
-    }
+    const span = dateSpan(dates);
+    if (!span) return { points: [], workouts: [] };
+    const [points, workouts] = await Promise.all([
+      this.rowsFor(POINTS_BETWEEN, span[0], span[1]),
+      this.rowsFor(WORKOUTS_RANGE, span[0], span[1]),
+    ]);
     return { points, workouts };
   }
 
@@ -68,8 +72,44 @@ export class D1Storage {
     return normalizeBackfill(rows[0]);
   }
 
-  async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
-    const statement = this.db.prepare(ADD_BACKFILL).bind(openedAt, closeAt, addBytes, addDays);
+  async hasStoredData() {
+    const rows = await this.rowsFor(HAS_STORED_DATA);
+    return rows.length > 0;
+  }
+
+  async countNewIngestDays(points, workouts) {
+    const dates = [...new Set([...(points || []).map((point) => point.date), ...(workouts || []).map((workout) => workout.date)])];
+    return countNewDays(points, workouts, await this.loadStored(dates));
+  }
+
+  async reserveIngestBackfill(args) {
+    const addDays = await this.countNewIngestDays(args.points, args.workouts);
+    const statement = this.db.prepare(RESERVE_BACKFILL).bind(
+      args.openedAt,
+      args.closeAt,
+      args.addBytes,
+      addDays,
+      args.deadline,
+      args.totalBytes,
+      args.nowIso,
+      args.nowIso,
+    );
+    const results = await this.run(() => this.db.batch([statement]));
+    const reserved = normalizeBackfill(results?.[0]?.results?.[0]);
+    if (!reserved) return null;
+    if (args.write) await args.write();
+    return reserved;
+  }
+
+  async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
+    const statement = this.db.prepare(FINISH_BACKFILL).bind(
+      openedAt,
+      closedAt,
+      addBytes,
+      addDays,
+      deadline || closedAt,
+      totalBytes,
+    );
     const results = await this.run(() => this.db.batch([statement]));
     return normalizeBackfill(results?.[0]?.results?.[0]) || this.readIngestBackfill();
   }
@@ -109,23 +149,21 @@ export class D1Storage {
     if (shouldStoreRaw(batch)) {
       statements.push(this.db.prepare(INSERT_RAW).bind(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload));
     }
-    for (const point of diff.points) {
-      statements.push(
-        this.db.prepare(point.replace ? REPLACE_POINT : UPSERT_POINT).bind(
-          point.date,
-          point.metric,
-          point.sum_qty,
-          point.last_qty,
-          point.last_ts,
-          point.units,
-          point.n,
-        ),
-      );
+    const replacePoints = diff.points.filter((point) => point.replace);
+    const guardPoints = diff.points.filter((point) => !point.replace);
+    for (const chunk of jsonChunks(replacePoints.map(pointJson))) {
+      statements.push(this.db.prepare(REPLACE_POINTS_JSON).bind(chunk));
     }
-    for (const workout of diff.workouts) {
-      statements.push(
-        this.db.prepare(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
-      );
+    for (const chunk of jsonChunks(guardPoints.map(pointJson))) {
+      statements.push(this.db.prepare(UPSERT_POINTS_JSON).bind(chunk));
+    }
+    const insertOnly = diff.workouts.filter((workout) => workout.insertOnly);
+    const upserts = diff.workouts.filter((workout) => !workout.insertOnly);
+    for (const chunk of jsonChunks(insertOnly.map(workoutJson))) {
+      statements.push(this.db.prepare(INSERT_WORKOUTS_JSON).bind(chunk));
+    }
+    for (const chunk of jsonChunks(upserts.map(workoutJson))) {
+      statements.push(this.db.prepare(UPSERT_WORKOUTS_JSON).bind(chunk));
     }
     const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
     if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());

@@ -14,10 +14,18 @@ export const DEFAULT_INGEST_MAX_BODY_BYTES = 1_000_000;
 export const DEFAULT_INGEST_RATE_PER_HOUR = 6;
 
 /** Per-request cap while the initial import window is open. */
-export const DEFAULT_INGEST_BACKFILL_MAX_BYTES = 25_000_000;
+export const DEFAULT_INGEST_BACKFILL_MAX_BYTES = 5_000_000;
 
-/** Upper bound for a malformed per-request import cap. */
-export const MAX_INGEST_BACKFILL_MAX_BYTES = 100_000_000;
+/** Hard upper bound for the per-request import cap. */
+export const MAX_INGEST_BACKFILL_MAX_BYTES = 10_000_000;
+
+/** Distinct dates allowed in one ingest request. */
+export const MAX_INGEST_DATES = 366;
+
+/** Earliest calendar date an import may store. */
+export const DEFAULT_INGEST_MIN_DATE = "2000-01-01";
+
+export const CHUNK_HINT = "Import history in chunks of 5 MB or less.";
 
 /** Accepted posts per token per UTC hour while the initial import window is open. */
 export const DEFAULT_INGEST_BACKFILL_MAX_PER_HOUR = 60;
@@ -39,7 +47,7 @@ export const MAX_INGEST_BACKFILL_HOURS = 24 * 366;
 
 export const INITIAL_IMPORT_CLOSED = "The initial import window is closed.";
 
-export const SHORTER_DATE_RANGE = "Send a shorter date range.";
+export const SHORTER_DATE_RANGE = `Send a shorter date range. ${CHUNK_HINT}`;
 
 /** A payload that drops at least this many dated records looks like a full history. */
 export const STALE_HINT_AT = 50;
@@ -48,7 +56,7 @@ export const STALE_HINT_AT = 50;
 export const FUTURE_SKEW_DAYS = 1;
 
 export const EXPORT_HINT =
-  "This export looks misconfigured: it sent too much history or it is posting too often. Follow Recommended export settings in the README.";
+  "This export looks misconfigured: it sent too much history or it is posting too often. Import history in chunks of 5 MB or less. Follow Recommended export settings in the README.";
 
 function configuredInteger(value) {
   if (typeof value === "number" && Number.isInteger(value)) return value;
@@ -98,6 +106,11 @@ export function resolveBackfillHours(value) {
   return resolveAtLeastOne(value, DEFAULT_INGEST_BACKFILL_HOURS, MAX_INGEST_BACKFILL_HOURS);
 }
 
+export function resolveMinDate(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  return DEFAULT_INGEST_MIN_DATE;
+}
+
 export function backfillLimits(ctx = {}) {
   return {
     maxBytes: resolveBackfillMaxBytes(ctx.ingestBackfillMaxBytes),
@@ -109,11 +122,14 @@ export function backfillLimits(ctx = {}) {
 
 export function normalizeBackfill(row) {
   if (!row) return null;
+  const total = row.total_bytes == null || row.total_bytes === "" ? null : Number(row.total_bytes);
   return {
     opened_at: String(row.opened_at),
     closed_at: row.closed_at == null || row.closed_at === "" ? null : String(row.closed_at),
     bytes: Number(row.bytes),
     days: Number(row.days),
+    deadline: row.deadline == null || row.deadline === "" ? null : String(row.deadline),
+    total_bytes: Number.isFinite(total) ? total : null,
   };
 }
 
@@ -124,37 +140,54 @@ export function backfillClosesAt(openedAt, hours) {
   return new Date(opened + hours * 3_600_000).toISOString();
 }
 
+function rowDeadline(row, limits) {
+  if (row.deadline) return row.deadline;
+  return backfillClosesAt(row.opened_at, limits.hours);
+}
+
+function rowTotal(row, limits) {
+  return row.total_bytes == null ? limits.totalBytes : Number(row.total_bytes);
+}
+
 /**
- * `open` is true when no row exists yet, or the row is still inside its
- * time and byte budget. `closes_at` is the deadline while open, or the
- * time it actually closed.
+ * A missing row is not an open window. `pending` is set by the caller when
+ * the database has no stored data yet, so this request may create the row.
+ * `bytes_remaining` is 0 once the window is closed.
  */
 export function backfillStatus(row, limits, now) {
   if (!row) {
-    return { open: true, closes_at: null, bytes_remaining: limits.totalBytes };
+    return { open: false, closes_at: null, bytes_remaining: 0, pending: false };
   }
-  const scheduled = backfillClosesAt(row.opened_at, limits.hours);
+  const scheduled = rowDeadline(row, limits);
+  const total = rowTotal(row, limits);
   const expired = !(now.getTime() < Date.parse(scheduled));
-  const full = Number(row.bytes) >= limits.totalBytes;
+  const full = Number(row.bytes) >= total;
   const open = row.closed_at == null && !expired && !full;
   return {
     open,
     closes_at: row.closed_at || scheduled,
-    bytes_remaining: Math.max(0, limits.totalBytes - Number(row.bytes)),
+    bytes_remaining: open ? Math.max(0, total - Number(row.bytes)) : 0,
+    pending: false,
   };
 }
 
 /** Byte and hourly caps for this request. An open window never tightens them. */
 export function activeIngestLimits(row, ctx, now) {
   const limits = backfillLimits(ctx);
-  const view = backfillStatus(row, limits, now);
+  const pending = !row;
+  const view = pending
+    ? { open: false, closes_at: null, bytes_remaining: 0, pending: true }
+    : backfillStatus(row, limits, now);
+  const relaxed = view.open || pending;
   const normalBytes = resolveMaxBodyBytes(ctx.ingestMaxBodyBytes);
   const normalRate = resolveRatePerHour(ctx.ingestRatePerHour);
   return {
     limits,
     view,
-    byteLimit: view.open ? Math.max(normalBytes, limits.maxBytes) : normalBytes,
-    rateLimit: view.open ? (normalRate === 0 ? limits.perHour : Math.max(normalRate, limits.perHour)) : normalRate,
+    pending,
+    admitRemaining: view.open ? view.bytes_remaining : (pending ? limits.totalBytes : 0),
+    byteLimit: relaxed ? Math.max(normalBytes, limits.maxBytes) : normalBytes,
+    rateLimit: relaxed ? (normalRate === 0 ? limits.perHour : Math.max(normalRate, limits.perHour)) : normalRate,
   };
 }
 
@@ -215,6 +248,20 @@ export function backfillTotalBody() {
   };
 }
 
+export function tooManyDatesBody() {
+  return {
+    error: "payload_too_large",
+    message: `This request covers more than ${MAX_INGEST_DATES} dates. Send it in chunks of ${MAX_INGEST_DATES} dates or fewer. ${CHUNK_HINT}`,
+  };
+}
+
+export function beforeMinDateBody(minDate) {
+  return {
+    error: "outside_window",
+    message: `Dates before ${minDate} are not accepted.`,
+  };
+}
+
 /**
  * Keep points and workouts from today minus `maxAgeDays` through today plus
  * `FUTURE_SKEW_DAYS`. `dropped_stale` and `dropped_future` count dated samples
@@ -224,24 +271,36 @@ function isIsoDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value || "");
 }
 
-export function filterRecent(points, workouts, { now, timeZone, maxAgeDays, keepPast = false }) {
+export function filterRecent(points, workouts, { now, timeZone, maxAgeDays, keepPast = false, minDate = DEFAULT_INGEST_MIN_DATE }) {
   const today = localDate(now.toISOString(), timeZone);
   const cutoff = keepPast ? today : shiftIsoDate(today, -maxAgeDays);
   const future = shiftIsoDate(today, FUTURE_SKEW_DAYS);
+  const earliest = isIsoDate(minDate) ? minDate : DEFAULT_INGEST_MIN_DATE;
   if ((!keepPast && !isIsoDate(cutoff)) || !isIsoDate(future)) {
-    return { points: points || [], workouts: workouts || [], dropped_stale: 0, dropped_future: 0, cutoff, today };
+    return {
+      points: points || [],
+      workouts: workouts || [],
+      dropped_stale: 0,
+      dropped_future: 0,
+      dropped_early: 0,
+      cutoff,
+      today,
+    };
   }
   const keptPoints = [];
   const keptWorkouts = [];
   let droppedStale = 0;
   let droppedFuture = 0;
+  let droppedEarly = 0;
   for (const point of points || []) {
-    if (point.date > future) droppedFuture += 1;
+    if (point.date < earliest) droppedEarly += 1;
+    else if (point.date > future) droppedFuture += 1;
     else if (!keepPast && point.date < cutoff) droppedStale += 1;
     else keptPoints.push(point);
   }
   for (const workout of workouts || []) {
-    if (workout.date > future) droppedFuture += 1;
+    if (workout.date < earliest) droppedEarly += 1;
+    else if (workout.date > future) droppedFuture += 1;
     else if (!keepPast && workout.date < cutoff) droppedStale += 1;
     else keptWorkouts.push(workout);
   }
@@ -250,6 +309,7 @@ export function filterRecent(points, workouts, { now, timeZone, maxAgeDays, keep
     workouts: keptWorkouts,
     dropped_stale: droppedStale,
     dropped_future: droppedFuture,
+    dropped_early: droppedEarly,
     cutoff,
     today,
   };

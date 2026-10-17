@@ -72,7 +72,7 @@ test("D1 adapter sends every statement and surfaces the daily write limit", asyn
     },
     async batch(statements) {
       batches.push(statements.length);
-      if (batches.length === 2) throw new Error(WRITE_LIMIT);
+      throw new Error(WRITE_LIMIT);
     },
   };
   const points = Array.from({ length: D1_BATCH_LIMIT }, (_, index) => ({
@@ -97,7 +97,7 @@ test("D1 adapter sends every statement and surfaces the daily write limit", asyn
     }),
     (error) => error?.code === "D1_DAILY_LIMIT" && error.limit === "d1_rows_written",
   );
-  assert.deepEqual(batches, [D1_BATCH_LIMIT, 1]);
+  assert.deepEqual(batches, [2]);
 });
 
 test("a D1 daily write limit becomes 429 with Retry-After and limit_hit", async () => {
