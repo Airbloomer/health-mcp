@@ -195,7 +195,7 @@ test("streaming import, chunk upload, and allowlist", async () => {
 
   const plain = await handleRequest(request("/ingest", { method: "POST", body: "<html></html>" }), environment);
   assert.equal(plain.status, 400);
-  assert.deepEqual(await plain.json(), { error: "invalid_payload" });
+  assert.equal((await plain.json()).error, "invalid_payload");
 
   const zipped = await handleRequest(request("/ingest", { method: "POST", body: exportZip(exportXml()), headers: { "content-type": "application/zip" } }), ctx(new MemoryStorage()));
   assert.equal(zipped.status, 200);

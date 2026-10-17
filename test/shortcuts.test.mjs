@@ -161,7 +161,7 @@ test("prototype keys are not treated as known types or units", () => {
 test("POST /ingest/shortcuts rejects an oversized declared Content-Length", async () => {
   const req = new Request("http://localhost/ingest/shortcuts", {
     method: "POST",
-    headers: { authorization: "Bearer tok", "content-length": "20000001" },
+    headers: { authorization: "Bearer tok", "content-length": "25000001" },
     body: "{}",
   });
   const response = await handleRequest(req, ctx());
@@ -230,11 +230,17 @@ test("end before start is rejected with a locator that does not echo input", asy
   ] });
   assert.equal(response.status, 400);
   const text = await response.text();
-  assert.deepEqual(JSON.parse(text), { error: "invalid_payload", at: "samples[1]", field: "end" });
+  const parsed = JSON.parse(text);
+  assert.equal(parsed.error, "invalid_payload");
+  assert.equal(parsed.at, "samples[1]");
+  assert.equal(parsed.field, "end");
   assert.equal(text.includes(sentinel), false);
   const bad = await post(new MemoryStorage(), { samples: [{ type: "Steps", value: "SENTINEL_9", start: "2026-10-14" }] });
   const badText = await bad.text();
-  assert.deepEqual(JSON.parse(badText), { error: "invalid_payload", at: "samples[0]", field: "value" });
+  const parsedBad = JSON.parse(badText);
+  assert.equal(parsedBad.error, "invalid_payload");
+  assert.equal(parsedBad.at, "samples[0]");
+  assert.equal(parsedBad.field, "value");
   assert.equal(badText.includes("SENTINEL"), false);
   assert.deepEqual(shortcutsError({ workouts: [{ start: "x" }] }, { timeZone: "UTC", now: NOW }), { error: "invalid_payload", at: "workouts[0]", field: "start" });
 });

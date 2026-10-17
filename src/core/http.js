@@ -5,13 +5,17 @@ import { hcWebhookError, isHcWebhook, parseHcWebhook } from "./hc-webhook.js";
 import { healthExportProError, parseHealthExportPro } from "./health-export-pro.js";
 import {
   EXPORT_HINT,
+  activeIngestLimits,
+  backfillStatus,
+  backfillTotalBody,
   filterRecent,
   hourWindowStart,
+  outsideWindowBody,
   payloadTooLargeBody,
   rateLimitedBody,
+  resolveBackfillMaxBytes,
   resolveMaxAgeDays,
   resolveMaxBodyBytes,
-  resolveRatePerHour,
   secondsUntilNextHour,
   STALE_HINT_AT,
 } from "./ingest-guard.js";
@@ -52,14 +56,48 @@ function requestNow(ctx) {
   return ctx.now instanceof Date ? ctx.now : new Date();
 }
 
-function tooLarge(limit) {
-  return json(payloadTooLargeBody(limit), 413);
+function backfillFields(view) {
+  if (!view) return null;
+  return {
+    open: view.open,
+    closes_at: view.closes_at,
+    bytes_remaining: view.bytes_remaining,
+  };
 }
 
-function rateLimited(limit, now) {
-  const response = json(rateLimitedBody(limit), 429);
+function respond(body, status, view) {
+  const fields = backfillFields(view);
+  return json(fields ? { ...body, backfill: fields } : body, status);
+}
+
+function tooLarge(state) {
+  return respond(payloadTooLargeBody(state.byteLimit, {
+    closed: !state.view.open,
+    duringBackfill: state.view.open,
+  }), 413, state.view);
+}
+
+function overTotal(view) {
+  return respond(backfillTotalBody(), 413, view);
+}
+
+function rateLimited(limit, now, view) {
+  const response = respond(rateLimitedBody(limit, { closed: view && !view.open }), 429, view);
   response.headers.set("retry-after", String(secondsUntilNextHour(now)));
   return response;
+}
+
+function headerDone(req) {
+  return (req.headers.get("x-backfill") || "").trim().toLowerCase() === "done";
+}
+
+function markDone(state, body) {
+  if (body && typeof body === "object" && !Array.isArray(body) && body.backfill === "done") state.done = true;
+}
+
+function doneOnly(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) || body.backfill !== "done") return false;
+  return Object.keys(body).every((key) => key === "backfill");
 }
 
 /** One label per auth path. The credential itself is never stored. */
@@ -74,20 +112,34 @@ function rateKey(req) {
  * rejected posts writes at most once. An accepted post is that one counter write.
  * Old hour rows are not deleted here.
  */
-async function claimQuota(req, ctx) {
-  const limit = resolveRatePerHour(ctx.ingestRatePerHour);
+async function claimQuota(req, ctx, state) {
+  const limit = state.rateLimit;
   if (limit === 0) return null;
-  const now = requestNow(ctx);
-  const hits = await ctx.storage.claimIngestQuota(rateKey(req), hourWindowStart(now), limit);
+  const hits = await ctx.storage.claimIngestQuota(rateKey(req), hourWindowStart(state.now), limit);
   if (hits == null) {
     await ctx.storage.setExportHint(EXPORT_HINT);
-    return rateLimited(limit, now);
+    return rateLimited(limit, state.now, state.view);
   }
   return null;
 }
 
-function jsonByteLimit(ctx) {
-  return resolveMaxBodyBytes(ctx.ingestMaxBodyBytes);
+/**
+ * Read the single import-window row and close it when its time or byte
+ * budget is already spent. The row is created later, on the first accept.
+ */
+export async function syncIngestBackfill(ctx) {
+  const now = requestNow(ctx);
+  let row = await ctx.storage.readIngestBackfill();
+  const preview = activeIngestLimits(row, ctx, now);
+  if (row && row.closed_at == null && !preview.view.open) {
+    const deadline = Date.parse(preview.view.closes_at);
+    const closedAt = preview.view.bytes_remaining === 0 && now.getTime() < deadline
+      ? now.toISOString()
+      : preview.view.closes_at;
+    row = await ctx.storage.closeIngestBackfill(closedAt);
+  }
+  const active = activeIngestLimits(row, ctx, now);
+  return { ...active, now, row, done: false };
 }
 
 function payloadTooLargeError() {
@@ -182,7 +234,7 @@ async function readLimited(reader, limit) {
 async function readIngestBytes(req, jsonLimit) {
   const declared = declaredContentLength(req.headers.get("content-length"));
   const type = req.headers.get("content-type") || "";
-  if (declared != null && declared > MAX_PAYLOAD_CHARS) {
+  if (declared != null && declared > MAX_PAYLOAD_CHARS && !type.includes("json")) {
     await cancelStream(req.body);
     const error = payloadTooLargeError();
     error.apple = true;
@@ -235,14 +287,16 @@ async function readPrefixedIngest(reader, jsonLimit) {
   return concatBytes(chunks, size);
 }
 
-/** JSON text, or a 413 response when the body passes the configured cap. */
-async function readJsonText(req, ctx) {
-  const limit = jsonByteLimit(ctx);
+/** JSON text, or a 413 response when the body passes the active cap. */
+async function readJsonText(req, state) {
   try {
-    const bytes = await readCapped(req, limit);
-    return { text: new TextDecoder().decode(bytes) };
+    const bytes = await readCapped(req, state.byteLimit);
+    if (state.view.open && bytes.byteLength > state.view.bytes_remaining) {
+      return { response: overTotal(state.view) };
+    }
+    return { text: new TextDecoder().decode(bytes), bytes: bytes.byteLength };
   } catch (error) {
-    if (error?.code === "PAYLOAD_TOO_LARGE") return { response: tooLarge(limit) };
+    if (error?.code === "PAYLOAD_TOO_LARGE") return { response: tooLarge(state) };
     throw error;
   }
 }
@@ -271,7 +325,7 @@ export async function handleRequest(req, ctx) {
   return json({ error: "not_found" }, 404);
 }
 
-async function storeIngest(ctx, { points, workouts, samples, bytes, payload, extra, hint }) {
+async function storeIngest(ctx, { points, workouts, samples, bytes, payload, extra, hint }, state = null) {
   const timeZone = resolveTimeZone(ctx.timeZone);
   const now = requestNow(ctx);
   const dates = [...new Set([...points.map((point) => point.date), ...workouts.map((workout) => workout.date)])].sort();
@@ -289,7 +343,7 @@ async function storeIngest(ctx, { points, workouts, samples, bytes, payload, ext
     points,
     workouts,
   }, { hint });
-  return json({
+  const body = {
     ok: true,
     id,
     dates,
@@ -298,7 +352,18 @@ async function storeIngest(ctx, { points, workouts, samples, bytes, payload, ext
     written: counts?.written ?? 0,
     unchanged: counts?.unchanged ?? 0,
     ...extra,
+  };
+  if (!state || !state.view.open) return respond(body, 200, state?.view);
+  const already = state.row?.bytes ?? 0;
+  const closeAt = state.done || already + bytes >= state.limits.totalBytes ? now.toISOString() : null;
+  const row = await ctx.storage.addIngestBackfill({
+    openedAt: now.toISOString(),
+    closeAt,
+    addBytes: bytes,
+    addDays: counts?.newDays ?? 0,
   });
+  const view = backfillStatus(row, state.limits, now);
+  return respond(body, 200, view);
 }
 
 async function* limitBytes(stream, limit) {
@@ -326,7 +391,7 @@ async function* limitBytes(stream, limit) {
   }
 }
 
-async function acceptAppleExport(source, ctx, hint) {
+async function acceptAppleExport(source, ctx, hint, state = null) {
   try {
     const parsed = await parseAppleExport(source, {
       timeZone: resolveTimeZone(ctx.timeZone),
@@ -340,122 +405,211 @@ async function acceptAppleExport(source, ctx, hint) {
       bytes: parsed.bytes,
       payload: null,
       hint,
-    });
+    }, state);
   } catch (error) {
-    if (error?.code === "PAYLOAD_TOO_LARGE") return json({ error: "payload_too_large" }, 413);
+    if (error?.code === "PAYLOAD_TOO_LARGE") {
+      return state ? tooLarge(state) : json({ error: "payload_too_large" }, 413);
+    }
     if (error?.code === "INVALID_EXPORT" || error?.code === "INVALID_ZIP" || error?.code === "UNSUPPORTED_ZIP") {
-      return json({ error: "invalid_payload" }, 400);
+      return respond({ error: "invalid_payload" }, 400, state?.view);
     }
     throw error;
   }
 }
 
+/**
+ * A declared length above every configured cap is cancelled before any other
+ * await, so the stream is not pulled. A length between the steady cap and the
+ * import cap waits until the window row is known.
+ */
+async function preflightDeclaration(req, ctx) {
+  const declared = declaredContentLength(req.headers.get("content-length"));
+  if (declared == null) return null;
+  const json = (req.headers.get("content-type") || "").includes("json");
+  const ceiling = Math.max(resolveMaxBodyBytes(ctx.ingestMaxBodyBytes), resolveBackfillMaxBytes(ctx.ingestBackfillMaxBytes));
+  const over = json ? declared > ceiling : declared > MAX_PAYLOAD_CHARS;
+  if (!over) return null;
+  await cancelStream(req.body);
+  const state = await syncIngestBackfill(ctx);
+  if (!json) {
+    return respond(payloadTooLargeBody(MAX_PAYLOAD_CHARS, {
+      closed: !state.view.open,
+      duringBackfill: state.view.open,
+    }), 413, state.view);
+  }
+  return tooLarge(state);
+}
+
 async function ingest(req, ctx) {
-  const limit = jsonByteLimit(ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
   let bytes;
   try {
-    bytes = await readIngestBytes(req, limit);
+    bytes = await readIngestBytes(req, state.byteLimit);
   } catch (error) {
     if (error?.code === "PAYLOAD_TOO_LARGE") {
-      return error.apple ? json(payloadTooLargeBody(MAX_PAYLOAD_CHARS), 413) : tooLarge(limit);
+      if (error.apple) {
+        return respond(payloadTooLargeBody(MAX_PAYLOAD_CHARS, {
+          closed: !state.view.open,
+          duringBackfill: state.view.open,
+        }), 413, state.view);
+      }
+      return tooLarge(state);
     }
     throw error;
   }
+  if (state.view.open && bytes.byteLength > state.view.bytes_remaining) return overTotal(state.view);
   if (looksLikeAppleExport(bytes)) {
-    const limited = await claimQuota(req, ctx);
+    const limited = await claimQuota(req, ctx, state);
     if (limited) return limited;
-    return acceptAppleExport(bytes, ctx, null);
+    return acceptAppleExport(bytes, ctx, null, state);
   }
   const text = new TextDecoder().decode(bytes);
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, text.length);
   const timeZone = resolveTimeZone(ctx.timeZone);
   const healthConnect = adapterOptions(ctx);
-  if (!healthExportProError(body)) return storeParsed(req, ctx, parseHealthExportPro(body, { timeZone }), text);
-  if (body?.data == null && !syncFitError(body)) return storeParsed(req, ctx, parseSyncFit(body, { timeZone }), text);
-  if (!lifeDashboardError(body, healthConnect)) return storeParsed(req, ctx, parseLifeDashboard(body, healthConnect), text);
-  if (isLifeDashboard(body)) return json({ error: "invalid_payload" }, 400);
-  if (!hcWebhookError(body, healthConnect)) return storeParsed(req, ctx, parseHcWebhook(body, healthConnect), text);
-  if (isHcWebhook(body)) return json({ error: "invalid_payload" }, 400);
-  if (payloadError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(req, ctx, parse(body, { timeZone }), text, { recency: true });
+  if (!healthExportProError(body)) return storeParsed(req, ctx, parseHealthExportPro(body, { timeZone }), text, state);
+  if (body?.data == null && !syncFitError(body)) return storeParsed(req, ctx, parseSyncFit(body, { timeZone }), text, state);
+  if (!lifeDashboardError(body, healthConnect)) return storeParsed(req, ctx, parseLifeDashboard(body, healthConnect), text, state);
+  if (isLifeDashboard(body)) return respond({ error: "invalid_payload" }, 400, state.view);
+  if (!hcWebhookError(body, healthConnect)) return storeParsed(req, ctx, parseHcWebhook(body, healthConnect), text, state);
+  if (isHcWebhook(body)) return respond({ error: "invalid_payload" }, 400, state.view);
+  if (payloadError(body)) return respond({ error: "invalid_payload" }, 400, state.view);
+  return storeParsed(req, ctx, parse(body, { timeZone }), text, state, { recency: true });
+}
+
+async function closeDone(req, ctx, state, bytes) {
+  if (!state.view.open) {
+    return respond({ ok: true, written: 0, unchanged: 0, points: 0, workouts: 0, dates: [] }, 200, state.view);
+  }
+  const limited = await claimQuota(req, ctx, state);
+  if (limited) return limited;
+  const row = await ctx.storage.addIngestBackfill({
+    openedAt: state.now.toISOString(),
+    closeAt: state.now.toISOString(),
+    addBytes: bytes,
+    addDays: 0,
+  });
+  return respond({
+    ok: true,
+    written: 0,
+    unchanged: 0,
+    points: 0,
+    workouts: 0,
+    dates: [],
+  }, 200, backfillStatus(row, state.limits, state.now));
 }
 
 async function ingestHealthExportPro(req, ctx) {
-  const read = await readJsonText(req, ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
+  const read = await readJsonText(req, state);
   if (read.response) return read.response;
   const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
-  if (healthExportProError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(req, ctx, parseHealthExportPro(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, read.bytes);
+  if (healthExportProError(body)) return respond({ error: "invalid_payload" }, 400, state.view);
+  return storeParsed(req, ctx, parseHealthExportPro(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text, state);
 }
 
 async function ingestHcWebhook(req, ctx) {
-  const read = await readJsonText(req, ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
+  const read = await readJsonText(req, state);
   if (read.response) return read.response;
   const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, read.bytes);
   const healthConnect = adapterOptions(ctx);
-  if (hcWebhookError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(req, ctx, parseHcWebhook(body, healthConnect), text);
+  if (hcWebhookError(body, healthConnect)) return respond({ error: "invalid_payload" }, 400, state.view);
+  return storeParsed(req, ctx, parseHcWebhook(body, healthConnect), text, state);
 }
 
 async function ingestLifeDashboard(req, ctx) {
-  const read = await readJsonText(req, ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
+  const read = await readJsonText(req, state);
   if (read.response) return read.response;
   const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, read.bytes);
   const healthConnect = adapterOptions(ctx);
-  if (lifeDashboardError(body, healthConnect)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(req, ctx, parseLifeDashboard(body, healthConnect), text);
+  if (lifeDashboardError(body, healthConnect)) return respond({ error: "invalid_payload" }, 400, state.view);
+  return storeParsed(req, ctx, parseLifeDashboard(body, healthConnect), text, state);
 }
 
 async function ingestSyncFit(req, ctx) {
-  const read = await readJsonText(req, ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
+  const read = await readJsonText(req, state);
   if (read.response) return read.response;
   const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
-  if (syncFitError(body)) return json({ error: "invalid_payload" }, 400);
-  return storeParsed(req, ctx, parseSyncFit(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text);
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, read.bytes);
+  if (syncFitError(body)) return respond({ error: "invalid_payload" }, 400, state.view);
+  return storeParsed(req, ctx, parseSyncFit(body, { timeZone: resolveTimeZone(ctx.timeZone) }), text, state);
 }
 
 async function ingestShortcuts(req, ctx) {
-  const read = await readJsonText(req, ctx);
+  const declared = await preflightDeclaration(req, ctx);
+  if (declared) return declared;
+  const state = await syncIngestBackfill(ctx);
+  state.done = headerDone(req);
+  const read = await readJsonText(req, state);
   if (read.response) return read.response;
   const text = read.text;
   let body;
   try {
     body = JSON.parse(text);
   } catch {
-    return json({ error: "invalid_json" }, 400);
+    return respond({ error: "invalid_json" }, 400, state.view);
   }
+  markDone(state, body);
+  if (doneOnly(body)) return closeDone(req, ctx, state, read.bytes);
   const options = adapterOptions(ctx);
   const error = shortcutsError(body, options);
-  if (error) return json(error, 400);
+  if (error) return respond(error, 400, state.view);
   const parsed = parseShortcuts(body, options);
   const allow = storedMetricSet(ctx.metricAllowlist);
   const kept = parsed.points.filter((point) => allow.has(point.metric));
@@ -467,7 +621,7 @@ async function ingestShortcuts(req, ctx) {
   // URL-token workouts are insert-only and never change an existing workout.
   const bearer = Boolean(req.headers.get("authorization"));
   const points = bearer ? rows : rows.map(({ replace, ...row }) => ({ ...row, n: 0 }));
-  const limited = await claimQuota(req, ctx);
+  const limited = await claimQuota(req, ctx, state);
   if (limited) return limited;
   return storeIngest(ctx, {
     points,
@@ -477,26 +631,30 @@ async function ingestShortcuts(req, ctx) {
     payload: text,
     extra: { dropped: parsed.points.length - kept.length },
     hint: null,
-  });
+  }, state);
 }
 
-async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
+async function storeParsed(req, ctx, parsed, text, state, { recency = false } = {}) {
   let points = parsed.points;
   let workouts = parsed.workouts;
   let extra;
   let hint = null;
   if (recency) {
     const filtered = filterRecent(points, workouts, {
-      now: requestNow(ctx),
+      now: state.now,
       timeZone: resolveTimeZone(ctx.timeZone),
       maxAgeDays: resolveMaxAgeDays(ctx.ingestMaxAgeDays),
+      keepPast: state.view.open,
     });
+    if (!state.view.open && filtered.dropped_stale > 0 && filtered.points.length === 0 && filtered.workouts.length === 0) {
+      return respond(outsideWindowBody(), 422, state.view);
+    }
     points = filtered.points;
     workouts = filtered.workouts;
     extra = { dropped_stale: filtered.dropped_stale, dropped_future: filtered.dropped_future };
     if (filtered.dropped_stale >= STALE_HINT_AT) hint = EXPORT_HINT;
   }
-  const limited = await claimQuota(req, ctx);
+  const limited = await claimQuota(req, ctx, state);
   if (limited) return limited;
   const allow = storedMetricSet(ctx.metricAllowlist);
   const kept = points.filter((point) => allow.has(point.metric));
@@ -508,7 +666,7 @@ async function storeParsed(req, ctx, parsed, text, { recency = false } = {}) {
     payload: text,
     extra,
     hint,
-  });
+  }, state);
 }
 
 async function importApple(req, ctx) {

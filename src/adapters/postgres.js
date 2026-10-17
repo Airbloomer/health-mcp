@@ -1,6 +1,6 @@
 import pg from "pg";
 import { shouldStoreRaw } from "../core/aggregate.js";
-import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
 import {
@@ -9,7 +9,10 @@ import {
   LIST_METRICS,
   METRIC_RANGE,
   POINTS_FOR_DATE,
+  ADD_BACKFILL,
   CLAIM_QUOTA,
+  CLOSE_BACKFILL,
+  READ_BACKFILL,
   READ_HINT,
   splitStatements,
   toPostgres,
@@ -55,6 +58,18 @@ export function createPostgresStorageFromPool(pool) {
         }
       }
     },
+    async readIngestBackfill() {
+      const result = await pool.query(toPostgres(READ_BACKFILL));
+      return normalizeBackfill(result.rows[0]);
+    },
+    async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
+      const result = await pool.query(toPostgres(ADD_BACKFILL), [openedAt, closeAt, addBytes, addDays]);
+      return normalizeBackfill(result.rows[0]) || this.readIngestBackfill();
+    },
+    async closeIngestBackfill(closedAt) {
+      const result = await pool.query(toPostgres(CLOSE_BACKFILL), [closedAt]);
+      return normalizeBackfill(result.rows[0]) || this.readIngestBackfill();
+    },
     async claimIngestQuota(tokenKey, windowStart, limit) {
       const result = await pool.query(toPostgres(CLAIM_QUOTA), [tokenKey, windowStart, limit]);
       const hits = result.rows[0]?.hits;
@@ -81,10 +96,11 @@ export function createPostgresStorageFromPool(pool) {
         stored.workouts.push(...workouts.rows);
       }
       const diff = partitionIngest(batch.points, batch.workouts, stored);
+      const newDays = countNewDays(batch.points, batch.workouts, stored);
       const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
       const hasRaw = shouldStoreRaw(batch);
       if (!hasRaw && diff.points.length === 0 && diff.workouts.length === 0 && action === "skip") {
-        return { written: diff.written, unchanged: diff.unchanged };
+        return { written: diff.written, unchanged: diff.unchanged, newDays };
       }
       const client = await pool.connect();
       try {
@@ -125,7 +141,7 @@ export function createPostgresStorageFromPool(pool) {
       } finally {
         client.release();
       }
-      return { written: diff.written, unchanged: diff.unchanged };
+      return { written: diff.written, unchanged: diff.unchanged, newDays };
     },
     async queryDaySummary(date) {
       const points = await pool.query(toPostgres(POINTS_FOR_DATE), [date]);

@@ -1,11 +1,14 @@
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
-import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import {
   D1_BATCH_LIMIT,
+  ADD_BACKFILL,
+  CLOSE_BACKFILL,
   DELETE_HINT,
   INSERT_RAW,
+  READ_BACKFILL,
   LIST_METRICS,
   METRIC_RANGE,
   POINTS_FOR_DATE,
@@ -60,6 +63,23 @@ export class D1Storage {
     return { points, workouts };
   }
 
+  async readIngestBackfill() {
+    const rows = await this.rowsFor(READ_BACKFILL);
+    return normalizeBackfill(rows[0]);
+  }
+
+  async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
+    const statement = this.db.prepare(ADD_BACKFILL).bind(openedAt, closeAt, addBytes, addDays);
+    const results = await this.run(() => this.db.batch([statement]));
+    return normalizeBackfill(results?.[0]?.results?.[0]) || this.readIngestBackfill();
+  }
+
+  async closeIngestBackfill(closedAt) {
+    const statement = this.db.prepare(CLOSE_BACKFILL).bind(closedAt);
+    const results = await this.run(() => this.db.batch([statement]));
+    return normalizeBackfill(results?.[0]?.results?.[0]) || this.readIngestBackfill();
+  }
+
   async claimIngestQuota(tokenKey, windowStart, limit) {
     const statement = this.db.prepare(CLAIM_QUOTA).bind(tokenKey, windowStart, limit);
     const results = await this.run(() => this.db.batch([statement]));
@@ -82,7 +102,9 @@ export class D1Storage {
 
   async insertIngest(batch, options = {}) {
     const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
-    const diff = partitionIngest(batch.points, batch.workouts, await this.loadStored(dates));
+    const stored = await this.loadStored(dates);
+    const diff = partitionIngest(batch.points, batch.workouts, stored);
+    const newDays = countNewDays(batch.points, batch.workouts, stored);
     const statements = [];
     if (shouldStoreRaw(batch)) {
       statements.push(this.db.prepare(INSERT_RAW).bind(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload));
@@ -112,7 +134,7 @@ export class D1Storage {
       const chunk = statements.slice(i, i + D1_BATCH_LIMIT);
       if (chunk.length) await this.run(() => this.db.batch(chunk));
     }
-    return { written: diff.written, unchanged: diff.unchanged };
+    return { written: diff.written, unchanged: diff.unchanged, newDays };
   }
 
   async queryDaySummary(date) {

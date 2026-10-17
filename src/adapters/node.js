@@ -3,8 +3,8 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { activeUrlToken, redactRequestTarget } from "../core/auth.js";
-import { handleRequest } from "../core/http.js";
-import { payloadTooLargeBody, resolveMaxBodyBytes } from "../core/ingest-guard.js";
+import { handleRequest, syncIngestBackfill } from "../core/http.js";
+import { payloadTooLargeBody } from "../core/ingest-guard.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
 import { openPostgres } from "./postgres.js";
@@ -41,11 +41,17 @@ function requestPath(req) {
   return (req.url || "").split("?")[0];
 }
 
-function bodyLimit(req, ingestMaxBodyBytes) {
+function isJsonIngest(req) {
+  const path = requestPath(req);
+  if (path === "/mcp" || path === "/import/apple-health/chunk" || path === "/import/apple-health") return false;
+  return path === "/ingest" || path.startsWith("/ingest/");
+}
+
+function bodyLimit(req, byteLimit) {
   if (requestPath(req) === "/mcp") return MAX_MCP_BYTES;
   if (requestPath(req) === "/import/apple-health/chunk") return MAX_PAYLOAD_CHARS;
   const type = String(req.headers["content-type"] || "");
-  if (type.includes("json")) return resolveMaxBodyBytes(ingestMaxBodyBytes);
+  if (type.includes("json") && isJsonIngest(req)) return byteLimit;
   return MAX_PAYLOAD_CHARS;
 }
 
@@ -57,22 +63,28 @@ function declaredByteLength(req) {
   return Number(value);
 }
 
-function tooLargeError(req, limit) {
+function tooLargeError(req, limit, view) {
   const error = new Error("payload_too_large");
   error.code = "PAYLOAD_TOO_LARGE";
-  error.detail = requestPath(req) === "/mcp" ? { error: "payload_too_large" } : payloadTooLargeBody(limit);
+  if (requestPath(req) === "/mcp" || !isJsonIngest(req)) error.detail = { error: "payload_too_large" };
+  else {
+    error.detail = payloadTooLargeBody(limit, {
+      closed: view ? !view.open : false,
+      duringBackfill: Boolean(view?.open),
+    });
+  }
   return error;
 }
 
-async function readBody(req, ingestMaxBodyBytes) {
+async function readBody(req, byteLimit, view) {
   const chunks = [];
   let size = 0;
-  const limit = bodyLimit(req, ingestMaxBodyBytes);
+  const limit = bodyLimit(req, byteLimit);
   const declared = declaredByteLength(req);
-  if (declared != null && declared > limit) throw tooLargeError(req, limit);
+  if (declared != null && declared > limit) throw tooLargeError(req, limit, view);
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) throw tooLargeError(req, limit);
+    if (size > limit) throw tooLargeError(req, limit, view);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
@@ -99,23 +111,10 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, now, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, ingestBackfillMaxBytes, ingestBackfillPerHour, ingestBackfillTotalBytes, ingestBackfillHours, now, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
-      let request;
-      if (requestPath(req) === "/import/apple-health" && (req.method || "").toUpperCase() === "POST") {
-        const declared = declaredByteLength(req);
-        if (declared != null && declared > MAX_APPLE_EXPORT_BYTES) {
-          writeJson(res, 413, { error: "payload_too_large" });
-          req.destroy();
-          return;
-        }
-        request = toWebRequest(req, Readable.toWeb(req));
-      } else {
-        const body = await readBody(req, ingestMaxBodyBytes);
-        request = toWebRequest(req, body);
-      }
-      const response = await handleRequest(request, {
+      const context = {
         storage,
         token,
         urlToken,
@@ -128,8 +127,27 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         ingestMaxAgeDays,
         ingestMaxBodyBytes,
         ingestRatePerHour,
+        ingestBackfillMaxBytes,
+        ingestBackfillPerHour,
+        ingestBackfillTotalBytes,
+        ingestBackfillHours,
         now,
-      });
+      };
+      let request;
+      if (requestPath(req) === "/import/apple-health" && (req.method || "").toUpperCase() === "POST") {
+        const declared = declaredByteLength(req);
+        if (declared != null && declared > MAX_APPLE_EXPORT_BYTES) {
+          writeJson(res, 413, { error: "payload_too_large" });
+          req.destroy();
+          return;
+        }
+        request = toWebRequest(req, Readable.toWeb(req));
+      } else {
+        const state = await syncIngestBackfill(context);
+        const body = await readBody(req, state.byteLimit, state.view);
+        request = toWebRequest(req, body);
+      }
+      const response = await handleRequest(request, context);
       const payload = Buffer.from(await response.arrayBuffer());
       const headers = { "content-length": payload.length };
       response.headers.forEach((value, key) => {
@@ -183,6 +201,10 @@ if (isMainModule()) {
     ingestMaxAgeDays: process.env.INGEST_MAX_AGE_DAYS,
     ingestMaxBodyBytes: process.env.INGEST_MAX_BODY_BYTES,
     ingestRatePerHour: process.env.INGEST_RATE_LIMIT_PER_HOUR,
+    ingestBackfillMaxBytes: process.env.INGEST_BACKFILL_MAX_BYTES,
+    ingestBackfillPerHour: process.env.INGEST_BACKFILL_MAX_PER_HOUR,
+    ingestBackfillTotalBytes: process.env.INGEST_BACKFILL_MAX_TOTAL_BYTES,
+    ingestBackfillHours: process.env.INGEST_BACKFILL_HOURS,
     port,
     host,
   });

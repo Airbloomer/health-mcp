@@ -1,5 +1,5 @@
 import { shouldStoreRaw } from "./aggregate.js";
-import { hintAction, partitionIngest, withExportHint } from "./ingest-guard.js";
+import { countNewDays, hintAction, partitionIngest, withExportHint } from "./ingest-guard.js";
 import { summarizeDay } from "./summary.js";
 
 /**
@@ -24,6 +24,34 @@ export class MemoryStorage {
     this.workouts = new Map();
     this.quota = new Map();
     this.exportHint = null;
+    this.backfill = null;
+  }
+
+  async readIngestBackfill() {
+    return this.backfill ? { ...this.backfill } : null;
+  }
+
+  async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
+    if (!this.backfill) {
+      this.backfill = {
+        opened_at: openedAt,
+        closed_at: closeAt,
+        bytes: addBytes,
+        days: addDays,
+      };
+      return { ...this.backfill };
+    }
+    if (this.backfill.closed_at) return { ...this.backfill };
+    this.backfill.bytes += addBytes;
+    this.backfill.days += addDays;
+    if (closeAt) this.backfill.closed_at = closeAt;
+    return { ...this.backfill };
+  }
+
+  async closeIngestBackfill(closedAt) {
+    if (!this.backfill) return null;
+    if (!this.backfill.closed_at) this.backfill.closed_at = closedAt;
+    return { ...this.backfill };
   }
 
   async claimIngestQuota(tokenKey, windowStart, limit) {
@@ -56,10 +84,12 @@ export class MemoryStorage {
         payload: batch.payload,
       });
     }
-    const diff = partitionIngest(batch.points, batch.workouts, {
+    const stored = {
       points: [...this.points.values()],
       workouts: [...this.workouts.values()],
-    });
+    };
+    const diff = partitionIngest(batch.points, batch.workouts, stored);
+    const newDays = countNewDays(batch.points, batch.workouts, stored);
     for (const point of diff.points) {
       const { replace, ...stored } = point;
       this.points.set(`${point.date}\0${point.metric}`, stored);
@@ -71,7 +101,7 @@ export class MemoryStorage {
     const action = hintAction(this.exportHint, options.hint);
     if (action === "clear") this.exportHint = null;
     if (action === "set") this.exportHint = options.hint;
-    return { written: diff.written, unchanged: diff.unchanged };
+    return { written: diff.written, unchanged: diff.unchanged, newDays };
   }
 
   async queryDaySummary(date) {

@@ -2,12 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
-import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
+import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import { migrationFiles } from "./migrate.js";
 import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT,
   REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE,
-  CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT } from "./statements.js";
+  CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT, READ_BACKFILL, ADD_BACKFILL, CLOSE_BACKFILL } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -47,6 +47,9 @@ export function createSqliteStorage(filename) {
   const readHint = db.prepare(READ_HINT);
   const upsertHint = db.prepare(UPSERT_HINT);
   const deleteHint = db.prepare(DELETE_HINT);
+  const readBackfill = db.prepare(READ_BACKFILL);
+  const addBackfill = db.prepare(ADD_BACKFILL);
+  const closeBackfill = db.prepare(CLOSE_BACKFILL);
   const insertAll = db.transaction((batch, options = {}) => {
     const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
     const stored = { points: [], workouts: [] };
@@ -55,6 +58,7 @@ export function createSqliteStorage(filename) {
       stored.workouts.push(...workoutsForDate.all(date));
     }
     const diff = partitionIngest(batch.points, batch.workouts, stored);
+    const newDays = countNewDays(batch.points, batch.workouts, stored);
     if (shouldStoreRaw(batch)) {
       insertRaw.run(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload);
     }
@@ -67,10 +71,19 @@ export function createSqliteStorage(filename) {
     const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
     if (action === "clear") deleteHint.run();
     if (action === "set") upsertHint.run(options.hint);
-    return { written: diff.written, unchanged: diff.unchanged };
+    return { written: diff.written, unchanged: diff.unchanged, newDays };
   });
 
   return {
+    async readIngestBackfill() {
+      return normalizeBackfill(readBackfill.get());
+    },
+    async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
+      return normalizeBackfill(addBackfill.get(openedAt, closeAt, addBytes, addDays)) || this.readIngestBackfill();
+    },
+    async closeIngestBackfill(closedAt) {
+      return normalizeBackfill(closeBackfill.get(closedAt)) || this.readIngestBackfill();
+    },
     async claimIngestQuota(tokenKey, windowStart, limit) {
       const row = claimQuota.get(tokenKey, windowStart, limit);
       return row?.hits == null ? null : Number(row.hits);

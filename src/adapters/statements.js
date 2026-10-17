@@ -53,6 +53,23 @@ export const UPSERT_HINT =
 
 export const DELETE_HINT = "DELETE FROM export_hint WHERE id = 1";
 
+export const READ_BACKFILL =
+  "SELECT opened_at, closed_at, bytes, days FROM ingest_backfill WHERE id = 1";
+
+/** Create the window or add to it, and only while it is still open. */
+export const ADD_BACKFILL =
+  "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO UPDATE SET bytes = ingest_backfill.bytes + excluded.bytes, " +
+  "days = ingest_backfill.days + excluded.days, " +
+  "closed_at = COALESCE(ingest_backfill.closed_at, excluded.closed_at) " +
+  "WHERE ingest_backfill.closed_at IS NULL " +
+  "RETURNING opened_at, closed_at, bytes, days";
+
+/** Mark the window closed. A row that is already closed is left as it is. */
+export const CLOSE_BACKFILL =
+  "UPDATE ingest_backfill SET closed_at = ? WHERE id = 1 AND closed_at IS NULL " +
+  "RETURNING opened_at, closed_at, bytes, days";
+
 /** D1 rejects batches larger than this. */
 export const D1_BATCH_LIMIT = 500;
 

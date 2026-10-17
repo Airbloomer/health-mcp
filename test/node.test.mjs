@@ -16,7 +16,7 @@ const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.u
 
 test("migration SQL stays portable", () => {
   const files = migrationFiles();
-  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql", "0003_ingest_guards.sql"]);
+  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql", "0003_ingest_guards.sql", "0004_ingest_backfill.sql"]);
   for (const file of files) {
     assert.doesNotMatch(file.sql, /AUTOINCREMENT|WITHOUT ROWID|INSERT OR REPLACE|PRAGMA/i);
   }
