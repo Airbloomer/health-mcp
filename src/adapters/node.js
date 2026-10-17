@@ -203,6 +203,7 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         return;
       }
       if (retryableDatabaseError(error)) {
+        console.error(redactRequestTarget(`${req.method || ""} ${req.url || ""} unavailable ${error?.code || "database"}`, token, urlToken));
         if (!res.headersSent) writeJson(res, 503, { error: "unavailable" }, undefined, { "retry-after": "8" });
         else res.destroy();
         return;

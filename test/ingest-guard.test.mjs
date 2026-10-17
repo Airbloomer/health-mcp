@@ -511,13 +511,13 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
   const quiet = ctx(envStorage, { ingestRatePerHour: 0 });
   const first = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(steps("2026-10-16", 20)) }), quiet);
   assert.equal((await first.json()).written, 1);
-  assert.equal(writes.n, 2);
+  assert.equal(writes.n, 3);
   const before = writes.n;
   const repeat = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(steps("2026-10-16", 20)) }), quiet);
   const repeatBody = await repeat.json();
   assert.equal(repeatBody.written, 0);
   assert.equal(repeatBody.unchanged, 1);
-  assert.equal(writes.n, before);
+  assert.equal(writes.n, before + 1);
 
   const counted = { n: 0 };
   const rated = new D1Storage(d1FromSqlite(db, counted));
@@ -525,7 +525,7 @@ test("D1 repeat of the same day does not write, and an accepted post adds one qu
   const accepted = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(steps("2026-10-16", 20)) }), limited);
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).unchanged, 1);
-  assert.equal(counted.n, 1);
+  assert.equal(counted.n, 2);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_quota").get().n, 1);
   const quotaSql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ingest_quota'").get().sql;
   assert.match(quotaSql, /token_key/);

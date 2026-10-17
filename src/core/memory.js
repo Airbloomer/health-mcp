@@ -33,6 +33,7 @@ export class MemoryStorage {
     this.backfillLock = Promise.resolve();
     this.appleData = false;
     this.ingestData = false;
+    this.syncReads = true;
   }
 
   async withBackfillLock(fn) {
@@ -218,9 +219,7 @@ export class MemoryStorage {
       const { insertOnly, ...stored } = workout;
       this.workouts.set(`${workout.name}\0${workout.start}`, stored);
     }
-    const action = hintAction(this.exportHint, options.hint);
-    if (action === "clear") this.exportHint = null;
-    if (action === "set") this.exportHint = options.hint;
+    if (options.hint !== undefined) this.exportHint = options.hint;
     return { written: diff.written, unchanged: diff.unchanged, newDays };
   }
 
