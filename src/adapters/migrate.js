@@ -28,6 +28,14 @@ export function statementsForPostgres(sql) {
   );
 }
 
+/** `ALTER TABLE ... ADD COLUMN name`, or null. Leading `--` comments are ignored. */
+export function addedColumn(statement) {
+  const body = statement.replace(/--[^\n]*/g, "").trim();
+  const alter = body.match(/^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
+  if (!alter) return null;
+  return { table: alter[1], name: alter[2] };
+}
+
 /**
  * Skip an ADD COLUMN whose name is already on the table. A database that
  * applied an older copy of 0004 already has deadline and total_bytes.
@@ -35,11 +43,10 @@ export function statementsForPostgres(sql) {
 export function statementsForSqlite(db, sql) {
   const runnable = [];
   for (const statement of splitStatements(sql)) {
-    const body = statement.replace(/--[^\n]*/g, "").trim();
-    const alter = body.match(/^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
-    if (alter) {
-      const columns = db.prepare(`PRAGMA table_info(${alter[1]})`).all();
-      if (columns.some((column) => String(column.name).toLowerCase() === alter[2].toLowerCase())) continue;
+    const added = addedColumn(statement);
+    if (added) {
+      const columns = db.prepare(`PRAGMA table_info(${added.table})`).all();
+      if (columns.some((column) => String(column.name).toLowerCase() === added.name.toLowerCase())) continue;
     }
     runnable.push(statement);
   }

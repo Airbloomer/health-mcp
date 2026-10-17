@@ -89,13 +89,16 @@ export function createSqliteStorage(filename) {
     for (const chunk of chunks.guardPoints) upsertPointsJson.run(chunk);
     for (const chunk of chunks.insertOnly) insertWorkoutsJson.run(chunk);
     for (const chunk of chunks.upserts) upsertWorkoutsJson.run(chunk);
-    const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
-    if (action === "clear") deleteHint.run();
-    if (action === "set") upsertHint.run(options.hint);
+    if (options.hint !== undefined) {
+      readHint.get();
+      if (options.hint === null) deleteHint.run();
+      else upsertHint.run(options.hint);
+    }
     return { written: diff.written, unchanged: diff.unchanged, newDays };
   });
 
   return {
+    syncReads: true,
     async readIngestBackfill() {
       return normalizeBackfill(readBackfill.get());
     },

@@ -62,11 +62,15 @@ export const DEFAULT_INGEST_BACKFILL_HOURS = 72;
 export const MAX_INGEST_BACKFILL_HOURS = 24 * 366;
 
 /**
- * D1 allows 50 statements in one request. 45 counts the statements a
- * successful request runs and leaves room for a release if a write fails.
- * Configuration can only lower this. SQLite, Postgres, and memory have no budget.
+ * D1 allows 50 statements in one request. A successful request stays at or
+ * under 45. A failed charged write can add a release and an empty-row delete,
+ * which is 47 and leaves a margin of 3. Configuration can only lower the
+ * ceiling. SQLite, Postgres, and memory have no budget.
  */
 export const D1_STATEMENT_BUDGET = 45;
+
+/** Large Apple exports are split by this command. The Health export has no date range. */
+export const APPLE_CHUNK_COMMAND = "node src/cli/import-apple-health.js --chunk-url";
 
 export const DEFAULT_INGEST_MAX_STATEMENTS = D1_STATEMENT_BUDGET;
 
@@ -168,7 +172,8 @@ export function resolveMaxStatements(value) {
  * Statements D1 runs for this batch on an empty store, using the same chunk
  * lists as `insertIngest`. Each group is two stored-row reads. A charged
  * group adds two more reads and the reservation. Group 0 reads the origin
- * marker and inserts it, and reads the hint when `hint` is not undefined.
+ * marker and inserts it. When `hint` is passed, group 0 reads the hint and
+ * writes it.
  * `prefix` is the window read, the stored-data probe, a seal, and a claim
  * when those run. A release is not included: it runs only after a failed write.
  */
@@ -199,10 +204,7 @@ export function projectedIngestStatements({
     if (index === 0 && markOrigin) count += 2;
     if (index === 0 && raw) count += 1;
     count += chunks.replacePoints.length + chunks.guardPoints.length + chunks.insertOnly.length + chunks.upserts.length;
-    if (index === 0 && hint !== undefined) {
-      count += 1;
-      if (hintAction(null, hint) !== "skip") count += 1;
-    }
+    if (index === 0 && hint !== undefined) count += 2;
     total += count;
   }
   return total;
@@ -397,7 +399,7 @@ export function tooManyStatementsBody(maxBytes, { apple = false } = {}) {
   if (apple) {
     return {
       error: "payload_too_large",
-      message: "This export has too many days for one request. Export a shorter date range.",
+      message: `This export has too many days for one request. Run ${APPLE_CHUNK_COMMAND}.`,
     };
   }
   return {

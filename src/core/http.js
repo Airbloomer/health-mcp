@@ -8,6 +8,7 @@ import {
   byteShares,
   dateGroups,
   exportHint,
+  APPLE_CHUNK_COMMAND,
   activeIngestLimits,
   backfillClosesAt,
   backfillLimits,
@@ -689,6 +690,8 @@ async function acceptAppleExport(source, ctx, hint, state = null, { claim = null
  * storage returns null here so the caller can load the row and then cancel.
  */
 function trySyncBackfill(ctx) {
+  // Async stores would run this read, discard the promise, then read again.
+  if (!ctx.storage?.syncReads) return null;
   const read = ctx.storage.readIngestBackfill();
   if (read && typeof read.then === "function") return null;
   const row = read || null;
@@ -776,7 +779,7 @@ async function ingest(req, ctx) {
       if (error.apple) {
         return respond({
           error: "payload_too_large",
-          message: `Body exceeds ${MAX_PAYLOAD_CHARS} bytes. Export a shorter date range.`,
+          message: `Body exceeds ${MAX_PAYLOAD_CHARS} bytes. Run ${APPLE_CHUNK_COMMAND}.`,
         }, 413, clientView(state));
       }
       return tooLarge(state);

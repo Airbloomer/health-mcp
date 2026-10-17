@@ -18,18 +18,18 @@ npx wrangler d1 create health-mcp
 Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, `0005_quota_window_bigint.sql`, and `0006_ingest_backfill_deadline.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
 
 ```bash
-npx wrangler d1 migrations apply health-mcp --remote
+node src/cli/d1-migrate.js --remote
 printf '%s' 'replace-with-a-long-random-token' | npx wrangler secret put HEALTH_INGEST_TOKEN
 npx wrangler deploy
 ```
 
-`migrations apply` runs every pending file in order: `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, `0005_quota_window_bigint.sql`, then `0006_ingest_backfill_deadline.sql`. Do not deploy until all six have been applied. `0006` adds the stored deadline and total, and it inserts a closed import-window row when points, workouts, or raw payloads are already stored. A missing row is not an open window.
+`node src/cli/d1-migrate.js` runs every pending file in order: `0001_init.sql`, `0002_daily_points.sql`, `0003_ingest_guards.sql`, `0004_ingest_backfill.sql`, `0005_quota_window_bigint.sql`, then `0006_ingest_backfill_deadline.sql`. It skips an `ADD COLUMN` whose name is already on the table, and it records each file in both migration tables. Do not deploy until all six have been applied. `0006` adds the stored deadline and total, and it inserts a closed import-window row when points, workouts, or raw payloads are already stored. A missing row is not an open window.
 
 For local development, apply the same migrations before `wrangler dev`:
 
 ```bash
 cp dev.vars.example .dev.vars
-npx wrangler d1 migrations apply health-mcp --local
+node src/cli/d1-migrate.js --local
 npx wrangler dev
 ```
 
@@ -74,7 +74,7 @@ npm start
 
 Import an export from Apple Health into that database with `node src/cli/import-apple-health.js export.zip`. To send it to a running server instead, pass `--chunk-url http://127.0.0.1:8787/import/apple-health/chunk`. Set `HEALTH_INGEST_TOKEN` in the environment rather than passing `--token`.
 
-`0002_daily_points.sql` copies existing per-sample `points` rows into `points_daily` (one row per metric and day) and leaves the old table in place. Dropping it would count as a write for every old sample, so do that later with `DROP TABLE points;` once the daily write budget has room. On Cloudflare, apply `0002` with `wrangler d1 migrations apply` before `wrangler deploy`, as in the steps above. Node and Docker apply it on startup, before the server accepts traffic.
+`0002_daily_points.sql` copies existing per-sample `points` rows into `points_daily` (one row per metric and day) and leaves the old table in place. Dropping it would count as a write for every old sample, so do that later with `DROP TABLE points;` once the daily write budget has room. On Cloudflare, apply `0002` with `node src/cli/d1-migrate.js --remote` before `wrangler deploy`, as in the steps above. Node and Docker apply it on startup, before the server accepts traffic.
 
 ## Configuration
 
@@ -100,8 +100,8 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `INGEST_BACKFILL_HOURS` | no | Wrangler `[vars]`, or the process environment | How long the initial import window stays open after the first accepted ingest. Default `72`. Values below 1 use the default. Values above 8784 are clamped to 8784. The deadline is stored on the row when the window opens. |
 | `INGEST_BACKFILL_MAX_BYTES` | no | Wrangler `[vars]`, or the process environment | Per-request JSON body cap while the initial import window is open. Default `5000000`. Clamped to 10000000. The hint text uses this cap. The default wording is 5 MB. A `content-type` that does not contain `json` keeps the 20,000,000 byte cap. |
 | `INGEST_BACKFILL_MAX_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour while the initial import window is open. Default `60`. Clamped to 10000. |
-| `INGEST_BACKFILL_MAX_TOTAL_BYTES` | no | Wrangler `[vars]`, or the process environment | Total accepted body bytes for the whole initial import window. Default `500000000`. Clamped to 5000000000. The value is stored on the row when the window opens. |
-| `INGEST_MAX_STATEMENTS` | no | Wrangler `[vars]`, or the process environment | On D1, the most statements one ingest request may run, counted before any write. Default `45`. A larger value cannot raise that ceiling. Over the budget, D1 returns `413`. An Apple Health import asks for a shorter date range. A Health Auto Export request names `POST /import/apple-health/chunk`. SQLite and Postgres ignore this setting. |
+| `INGEST_BACKFILL_MAX_TOTAL_BYTES` | no | Wrangler `[vars]`, or the process environment | Total accepted body bytes for the whole initial import window. Default `500000000`. Clamped to 5000000000. The value is stored on the row when the window opens. Apple Health imports do not count toward this total. |
+| `INGEST_MAX_STATEMENTS` | no | Wrangler `[vars]`, or the process environment | On D1, the most statements one ingest request may run, counted before any write. Default `45`. A larger value cannot raise that ceiling. Over the budget, D1 returns `413`. An Apple Health import names `node src/cli/import-apple-health.js --chunk-url`. A Health Auto Export request names `POST /import/apple-health/chunk`. SQLite and Postgres ignore this setting. |
 
 Copy [`.env.example`](../.env.example) to `.env` for Node, or [`dev.vars.example`](../dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 

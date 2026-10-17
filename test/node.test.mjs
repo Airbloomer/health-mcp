@@ -338,9 +338,14 @@ test("a lock timeout is returned with retry-after", async () => {
   const { MemoryStorage } = await import("../src/core/memory.js");
   const storage = new MemoryStorage();
   storage.insertIngest = async () => {
-    const error = new Error("canceling statement due to statement timeout");
+    const error = new Error("secret-payload");
     error.code = "57014";
     throw error;
+  };
+  const lines = [];
+  const original = console.error;
+  console.error = (...args) => {
+    lines.push(args.map(String).join(" "));
   };
   const server = await startServer({ storage, token: "tok", port: 0, ingestRatePerHour: 0 });
   try {
@@ -355,7 +360,20 @@ test("a lock timeout is returned with retry-after", async () => {
     assert.equal(response.status, 503);
     assert.equal(response.headers.get("retry-after"), "8");
     assert.deepEqual(await response.json(), { error: "unavailable" });
+    const logged = lines.join("\n");
+    assert.match(logged, /57014/);
+    assert.equal(logged.includes("secret-payload"), false);
   } finally {
+    console.error = original;
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("wrangler row parser reads a log prefix and nested results", async () => {
+  const { parseWranglerRows } = await import("../src/cli/d1-migrate.js");
+  const text = "Executing on remote database\n[{\"success\":true,\"results\":[{\"id\":\"0001_init.sql\"}]}]";
+  assert.deepEqual(parseWranglerRows(text), [{ id: "0001_init.sql" }]);
+  const nested = JSON.stringify({ result: [{ success: true, results: [{ name: "deadline" }] }] });
+  assert.deepEqual(parseWranglerRows(nested), [{ name: "deadline" }]);
+  assert.throws(() => parseWranglerRows("[{\"success\":false,\"error\":\"nope\"}]"), /failed/);
 });

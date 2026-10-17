@@ -8,6 +8,8 @@ import Database from "better-sqlite3";
 import { test } from "node:test";
 import { applyD1Migrations, D1Storage } from "../src/adapters/d1.js";
 import { migrationFiles } from "../src/adapters/migrate.js";
+import { aggregateDays, storedMetricSet } from "../src/core/aggregate.js";
+import { parse } from "../src/core/parse.js";
 import { startServer } from "../src/adapters/node.js";
 import { applySqliteMigrations, createSqliteStorage } from "../src/adapters/sqlite.js";
 import { RESERVE_BACKFILL, splitStatements } from "../src/adapters/statements.js";
@@ -933,7 +935,8 @@ test("d1 rejects an over-budget apple import before any write", async () => {
   assert.equal(response.status, 413);
   const payload = await response.json();
   assert.equal(payload.error, "payload_too_large");
-  assert.match(payload.message, /shorter date range/);
+  assert.match(payload.message, /node src\/cli\/import-apple-health\.js --chunk-url/);
+  assert.equal(payload.message.includes("shorter date range"), false);
   assert.equal(payload.message.includes("/chunk"), false);
   assert.equal(payload.message.toLowerCase().includes("initial import"), false);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, 0);
@@ -994,6 +997,127 @@ test("an apple import applies the minimum date without opening the window", asyn
   assert.equal(rejected.status, 422);
   assert.equal(early.points.size, 0);
   assert.equal(early.backfill, null);
+});
+
+function sealClosed(db) {
+  db.prepare(
+    "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) VALUES (1, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 0, 0, '2026-10-01T00:00:00.000Z', 0)",
+  ).run();
+  db.prepare("INSERT INTO export_hint (id, hint) VALUES (1, ?)").run("stored hint");
+}
+
+function closedProjection(points, workouts = []) {
+  return projectedIngestStatements({
+    points,
+    workouts,
+    charge: false,
+    hint: null,
+    markOrigin: true,
+    prefix: 1,
+  });
+}
+
+async function countedIngest(body, headers = {}) {
+  const db = new Database(":memory:");
+  applySqliteMigrations(db);
+  sealClosed(db);
+  const counter = { n: 0 };
+  const storage = new D1Storage(d1FromSqlite(db, counter));
+  const response = await handleRequest(
+    request(body, headers),
+    ctx(storage, { ingestRatePerHour: 0, ingestMaxStatements: 10000 }),
+  );
+  return { db, counter, response };
+}
+
+test("ingest projections match d1 when a hint is already stored", async () => {
+  const jsonBody = steps("2026-10-16", 4);
+  const parsed = parse(jsonBody, { timeZone: "UTC" });
+  const points = aggregateDays(parsed.points, storedMetricSet());
+  const json = await countedIngest(JSON.stringify(jsonBody));
+  assert.equal(json.response.status, 200, JSON.stringify(await json.response.clone().json()));
+  assert.equal(json.counter.n, closedProjection(points, parsed.workouts));
+  assert.equal(json.db.prepare("SELECT hint FROM export_hint WHERE id = 1").get(), undefined);
+  json.db.close();
+
+  const xml = appleSteps(3, "2010-06-01");
+  const apple = await parseAppleExport(xml, { timeZone: "UTC" });
+  const posted = await countedIngest(xml, { "content-type": "application/xml" });
+  assert.equal(posted.response.status, 200, JSON.stringify(await posted.response.clone().json()));
+  assert.equal(posted.counter.n, closedProjection(apple.points, apple.workouts));
+  assert.equal(posted.db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, apple.points.length);
+  posted.db.close();
+});
+
+function applePointCatalog(days, names, start = "2010-01-01") {
+  const specs = names.map((name) => ({
+    metric: HK_QUANTITY_METRICS[name],
+    units: name === "BodyMass" ? "kg" : name === "BodyFatPercentage" ? "%" : name.includes("Energy") || name.includes("Dietary") ? "kcal" : "count",
+  })).sort((a, b) => (a.metric < b.metric ? -1 : a.metric > b.metric ? 1 : 0));
+  const points = [];
+  for (let index = 0; index < days; index += 1) {
+    const date = shiftDate(start, index);
+    for (const spec of specs) {
+      points.push({
+        metric: spec.metric,
+        date,
+        sum_qty: 1,
+        last_qty: 1,
+        last_ts: `${date} 09:00:00 +0000`,
+        units: spec.units,
+        n: 1,
+      });
+    }
+  }
+  return points;
+}
+
+test("d1 accepts 45 statements and rejects 46 before writing", async () => {
+  const names = Object.keys(HK_QUANTITY_METRICS).slice(0, 8);
+  const catalog = applePointCatalog(4000, names);
+  const projectDays = (days) => closedProjection(catalog.slice(0, days * names.length));
+  let low = 1;
+  let high = 4000;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (projectDays(mid) < 45) low = mid + 1;
+    else high = mid;
+  }
+  let at45 = null;
+  let at46 = null;
+  for (let days = Math.max(1, low - 5); days <= Math.min(4000, low + 400); days += 1) {
+    const count = projectDays(days);
+    if (count === 45) at45 = days;
+    if (count === 46) at46 = days;
+    if (at45 != null && at46 != null) break;
+  }
+  assert.ok(at45, `no request projects to 45 near ${low} days`);
+  assert.ok(at46, `no request projects to 46 near ${low} days`);
+
+  const sample = await parseAppleExport(appleMetrics(1, "2010-01-01", names), { timeZone: "UTC" });
+  assert.deepEqual(sample.points, catalog.slice(0, names.length));
+
+  const acceptedXml = appleMetrics(at45, "2010-01-01", names);
+  const acceptedParsed = await parseAppleExport(acceptedXml, { timeZone: "UTC" });
+  assert.equal(closedProjection(acceptedParsed.points, acceptedParsed.workouts), 45);
+  const accepted = await countedIngest(acceptedXml, { "content-type": "application/xml" });
+  assert.equal(accepted.response.status, 200, JSON.stringify(await accepted.response.clone().json()));
+  assert.equal(accepted.counter.n, 45);
+  assert.equal(accepted.db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, acceptedParsed.points.length);
+  accepted.db.close();
+
+  const rejectedXml = appleMetrics(at46, "2010-01-01", names);
+  const rejectedParsed = await parseAppleExport(rejectedXml, { timeZone: "UTC" });
+  assert.equal(closedProjection(rejectedParsed.points, rejectedParsed.workouts), 46);
+  const rejected = await countedIngest(rejectedXml, { "content-type": "application/xml" });
+  assert.equal(rejected.response.status, 413);
+  const payload = await rejected.response.json();
+  assert.match(payload.message, /node src\/cli\/import-apple-health\.js --chunk-url/);
+  assert.equal(payload.message.includes("shorter date range"), false);
+  assert.equal(rejected.counter.n, 1);
+  assert.equal(rejected.db.prepare("SELECT COUNT(*) AS n FROM points_daily").get().n, 0);
+  assert.equal(rejected.db.prepare("SELECT hint FROM export_hint WHERE id = 1").get().hint, "stored hint");
+  rejected.db.close();
 });
 
 function datedPoints(count, start = "2010-01-01") {
@@ -1232,4 +1356,45 @@ test("d1 migration 0006 skips columns that are already present", async () => {
   await applyD1Migrations(binding);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 1);
   db.close();
+});
+
+test("d1 migrations record both tables and skip columns already added", async () => {
+  const legacy = new Database(":memory:");
+  for (const file of migrationFiles()) {
+    if (file.id.startsWith("0006")) continue;
+    for (const statement of splitStatements(file.sql)) legacy.prepare(statement).run();
+  }
+  legacy.exec("ALTER TABLE ingest_backfill ADD COLUMN deadline TEXT");
+  legacy.exec("ALTER TABLE ingest_backfill ADD COLUMN total_bytes BIGINT");
+  legacy.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  const mark = legacy.prepare("INSERT INTO d1_migrations (name, applied_at) VALUES (?, ?)");
+  for (const file of migrationFiles()) {
+    if (file.id.startsWith("0006")) continue;
+    mark.run(file.id, "2026-01-01T00:00:00.000Z");
+  }
+  legacy.prepare(
+    "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run("2024-01-02", "step_count", 1, 1, "2024-01-02 09:00:00", "count", 1);
+  const binding = d1FromSqlite(legacy);
+  const applied = await applyD1Migrations(binding);
+  assert.deepEqual(applied, ["0006_ingest_backfill_deadline.sql"]);
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 1);
+  assert.equal(legacy.prepare("SELECT closed_at FROM ingest_backfill WHERE id = 1").get().closed_at, "1970-01-01T00:00:00.000Z");
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM schema_migrations WHERE id = ?").get("0006_ingest_backfill_deadline.sql").n, 1);
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM d1_migrations WHERE name = ?").get("0006_ingest_backfill_deadline.sql").n, 1);
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get().n, migrationFiles().length);
+  const again = await applyD1Migrations(binding);
+  assert.deepEqual(again, []);
+  assert.equal(legacy.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 1);
+  legacy.close();
+
+  const fresh = new Database(":memory:");
+  const first = await applyD1Migrations(d1FromSqlite(fresh));
+  assert.equal(first.length, migrationFiles().length);
+  const names = fresh.prepare("PRAGMA table_info(ingest_backfill)").all().map((column) => column.name);
+  assert.equal(names.filter((name) => name === "deadline").length, 1);
+  assert.equal(names.filter((name) => name === "total_bytes").length, 1);
+  assert.equal(fresh.prepare("SELECT COUNT(*) AS n FROM ingest_backfill").get().n, 0);
+  assert.deepEqual(await applyD1Migrations(d1FromSqlite(fresh)), []);
+  fresh.close();
 });
