@@ -2,9 +2,9 @@ import http from "node:http";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
-import { activeUrlToken, redactRequestTarget } from "../core/auth.js";
+import { activeUrlToken, authed, redactRequestTarget } from "../core/auth.js";
 import { handleRequest, syncIngestBackfill } from "../core/http.js";
-import { payloadTooLargeBody } from "../core/ingest-guard.js";
+import { backfillTotalBody, payloadTooLargeBody, resolveMaxBodyBytes } from "../core/ingest-guard.js";
 import { MAX_MCP_BYTES } from "../core/mcp.js";
 import { MAX_APPLE_EXPORT_BYTES, MAX_PAYLOAD_CHARS } from "../core/metrics.js";
 import { openPostgres } from "./postgres.js";
@@ -63,28 +63,53 @@ function declaredByteLength(req) {
   return Number(value);
 }
 
-function tooLargeError(req, limit, view) {
+function requestIsAuthed(req, token, urlToken) {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+    } else headers.append(key, value);
+  }
+  const host = req.headers.host || "localhost";
+  return authed(new Request(`http://${host}${req.url || "/"}`, { method: req.method, headers }), {
+    HEALTH_INGEST_TOKEN: token,
+    HEALTH_INGEST_URL_TOKEN: urlToken,
+  });
+}
+
+function preAuthLimit(req, ingestMaxBodyBytes) {
+  if (requestPath(req) === "/mcp") return MAX_MCP_BYTES;
+  if (requestPath(req) === "/import/apple-health") return MAX_APPLE_EXPORT_BYTES;
+  if (requestPath(req) === "/import/apple-health/chunk") return MAX_PAYLOAD_CHARS;
+  const type = String(req.headers["content-type"] || "");
+  if (type.includes("json") && isJsonIngest(req)) return resolveMaxBodyBytes(ingestMaxBodyBytes);
+  return MAX_PAYLOAD_CHARS;
+}
+
+function tooLargeError(req, limit, state) {
   const error = new Error("payload_too_large");
   error.code = "PAYLOAD_TOO_LARGE";
+  const relaxed = Boolean(state?.view?.open || state?.pending);
   if (requestPath(req) === "/mcp" || !isJsonIngest(req)) error.detail = { error: "payload_too_large" };
   else {
     error.detail = payloadTooLargeBody(limit, {
-      closed: view ? !view.open : false,
-      duringBackfill: Boolean(view?.open),
+      closed: state ? !relaxed : false,
+      duringBackfill: relaxed,
     });
   }
   return error;
 }
 
-async function readBody(req, byteLimit, view) {
+async function readBody(req, byteLimit, state) {
   const chunks = [];
   let size = 0;
   const limit = bodyLimit(req, byteLimit);
   const declared = declaredByteLength(req);
-  if (declared != null && declared > limit) throw tooLargeError(req, limit, view);
+  if (declared != null && declared > limit) throw tooLargeError(req, limit, state);
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) throw tooLargeError(req, limit, view);
+    if (size > limit) throw tooLargeError(req, limit, state);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
@@ -111,7 +136,7 @@ function toWebRequest(req, body) {
   return new Request(`http://${host}${req.url}`, init);
 }
 
-export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, ingestBackfillMaxBytes, ingestBackfillPerHour, ingestBackfillTotalBytes, ingestBackfillHours, now, port = 8787, host = "0.0.0.0" }) {
+export function startServer({ storage, token = "", urlToken = "", timeZone, storeRaw, metricAllowlist, sourcePriority, shortcutsSourcePriority, mcpAllowedOrigins, ingestMaxAgeDays, ingestMaxBodyBytes, ingestRatePerHour, ingestBackfillMaxBytes, ingestBackfillPerHour, ingestBackfillTotalBytes, ingestBackfillHours, ingestMinDate, now, port = 8787, host = "0.0.0.0" }) {
   const server = http.createServer(async (req, res) => {
     try {
       const context = {
@@ -131,8 +156,17 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         ingestBackfillPerHour,
         ingestBackfillTotalBytes,
         ingestBackfillHours,
+        ingestMinDate,
         now,
       };
+      if (!requestIsAuthed(req, token, urlToken)) {
+        writeJson(res, 401, { error: "unauthorized" });
+        const declared = declaredByteLength(req);
+        const limit = preAuthLimit(req, ingestMaxBodyBytes);
+        if (declared != null && declared > limit) req.destroy();
+        else req.resume();
+        return;
+      }
       let request;
       if (requestPath(req) === "/import/apple-health" && (req.method || "").toUpperCase() === "POST") {
         const declared = declaredByteLength(req);
@@ -144,7 +178,19 @@ export function startServer({ storage, token = "", urlToken = "", timeZone, stor
         request = toWebRequest(req, Readable.toWeb(req));
       } else {
         const state = await syncIngestBackfill(context);
-        const body = await readBody(req, state.byteLimit, state.view);
+        const declared = declaredByteLength(req);
+        const limit = bodyLimit(req, state.byteLimit);
+        if (
+          declared != null
+          && (state.view.open || state.pending)
+          && declared > state.admitRemaining
+          && declared <= limit
+        ) {
+          writeJson(res, 413, backfillTotalBody());
+          req.destroy();
+          return;
+        }
+        const body = await readBody(req, state.byteLimit, state);
         request = toWebRequest(req, body);
       }
       const response = await handleRequest(request, context);
@@ -205,6 +251,7 @@ if (isMainModule()) {
     ingestBackfillPerHour: process.env.INGEST_BACKFILL_MAX_PER_HOUR,
     ingestBackfillTotalBytes: process.env.INGEST_BACKFILL_MAX_TOTAL_BYTES,
     ingestBackfillHours: process.env.INGEST_BACKFILL_HOURS,
+    ingestMinDate: process.env.INGEST_MIN_DATE,
     port,
     host,
   });

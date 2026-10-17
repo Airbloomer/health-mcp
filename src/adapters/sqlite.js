@@ -4,10 +4,12 @@ import Database from "better-sqlite3";
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { countNewDays, hintAction, normalizeBackfill, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
+import { dateSpan, jsonChunks, pointJson, workoutJson } from "./bulk.js";
 import { migrationFiles } from "./migrate.js";
-import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, UPSERT_POINT,
-  REPLACE_POINT, UPSERT_WORKOUT, INSERT_WORKOUT_IF_NEW, WORKOUTS_FOR_DATE, WORKOUTS_RANGE,
-  CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT, READ_BACKFILL, ADD_BACKFILL, CLOSE_BACKFILL } from "./statements.js";
+import { splitStatements, INSERT_RAW, LIST_METRICS, METRIC_RANGE, POINTS_FOR_DATE, POINTS_BETWEEN,
+  UPSERT_POINTS_JSON, REPLACE_POINTS_JSON, UPSERT_WORKOUTS_JSON, INSERT_WORKOUTS_JSON,
+  WORKOUTS_FOR_DATE, WORKOUTS_RANGE, CLAIM_QUOTA, READ_HINT, UPSERT_HINT, DELETE_HINT,
+  READ_BACKFILL, RESERVE_BACKFILL, FINISH_BACKFILL, CLOSE_BACKFILL, HAS_STORED_DATA } from "./statements.js";
 
 export function applySqliteMigrations(db) {
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
@@ -34,10 +36,6 @@ export function createSqliteStorage(filename) {
   applySqliteMigrations(db);
 
   const insertRaw = db.prepare(INSERT_RAW);
-  const upsertPoint = db.prepare(UPSERT_POINT);
-  const replacePoint = db.prepare(REPLACE_POINT);
-  const upsertWorkout = db.prepare(UPSERT_WORKOUT);
-  const insertWorkout = db.prepare(INSERT_WORKOUT_IF_NEW);
   const pointsForDate = db.prepare(POINTS_FOR_DATE);
   const workoutsForDate = db.prepare(WORKOUTS_FOR_DATE);
   const metricRange = db.prepare(METRIC_RANGE);
@@ -48,26 +46,36 @@ export function createSqliteStorage(filename) {
   const upsertHint = db.prepare(UPSERT_HINT);
   const deleteHint = db.prepare(DELETE_HINT);
   const readBackfill = db.prepare(READ_BACKFILL);
-  const addBackfill = db.prepare(ADD_BACKFILL);
+  const reserveBackfill = db.prepare(RESERVE_BACKFILL);
+  const finishBackfill = db.prepare(FINISH_BACKFILL);
   const closeBackfill = db.prepare(CLOSE_BACKFILL);
+  const hasStored = db.prepare(HAS_STORED_DATA);
+  const pointsBetween = db.prepare(POINTS_BETWEEN);
+  const upsertPointsJson = db.prepare(UPSERT_POINTS_JSON);
+  const replacePointsJson = db.prepare(REPLACE_POINTS_JSON);
+  const upsertWorkoutsJson = db.prepare(UPSERT_WORKOUTS_JSON);
+  const insertWorkoutsJson = db.prepare(INSERT_WORKOUTS_JSON);
+  const loadSpan = (dates) => {
+    const span = dateSpan(dates);
+    if (!span) return { points: [], workouts: [] };
+    return { points: pointsBetween.all(span[0], span[1]), workouts: workoutsRange.all(span[0], span[1]) };
+  };
   const insertAll = db.transaction((batch, options = {}) => {
     const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
-    const stored = { points: [], workouts: [] };
-    for (const date of dates) {
-      stored.points.push(...pointsForDate.all(date));
-      stored.workouts.push(...workoutsForDate.all(date));
-    }
+    const stored = loadSpan(dates);
     const diff = partitionIngest(batch.points, batch.workouts, stored);
     const newDays = countNewDays(batch.points, batch.workouts, stored);
     if (shouldStoreRaw(batch)) {
       insertRaw.run(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload);
     }
-    for (const point of diff.points) {
-      (point.replace ? replacePoint : upsertPoint).run(point.date, point.metric, point.sum_qty, point.last_qty, point.last_ts, point.units, point.n);
-    }
-    for (const workout of diff.workouts) {
-      (workout.insertOnly ? insertWorkout : upsertWorkout).run(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal);
-    }
+    const replacePoints = diff.points.filter((point) => point.replace);
+    const guardPoints = diff.points.filter((point) => !point.replace);
+    for (const chunk of jsonChunks(replacePoints.map(pointJson))) replacePointsJson.run(chunk);
+    for (const chunk of jsonChunks(guardPoints.map(pointJson))) upsertPointsJson.run(chunk);
+    const insertOnly = diff.workouts.filter((workout) => workout.insertOnly);
+    const upserts = diff.workouts.filter((workout) => !workout.insertOnly);
+    for (const chunk of jsonChunks(insertOnly.map(workoutJson))) insertWorkoutsJson.run(chunk);
+    for (const chunk of jsonChunks(upserts.map(workoutJson))) upsertWorkoutsJson.run(chunk);
     const action = hintAction(options.hint === undefined ? null : (readHint.get()?.hint ?? null), options.hint);
     if (action === "clear") deleteHint.run();
     if (action === "set") upsertHint.run(options.hint);
@@ -78,8 +86,33 @@ export function createSqliteStorage(filename) {
     async readIngestBackfill() {
       return normalizeBackfill(readBackfill.get());
     },
-    async addIngestBackfill({ openedAt, closeAt = null, addBytes = 0, addDays = 0 }) {
-      return normalizeBackfill(addBackfill.get(openedAt, closeAt, addBytes, addDays)) || this.readIngestBackfill();
+    async hasStoredData() {
+      return Boolean(hasStored.get());
+    },
+    async countNewIngestDays(points, workouts) {
+      const dates = [...new Set([...(points || []).map((point) => point.date), ...(workouts || []).map((workout) => workout.date)])];
+      return countNewDays(points, workouts, loadSpan(dates));
+    },
+    async reserveIngestBackfill(args) {
+      const addDays = await this.countNewIngestDays(args.points, args.workouts);
+      const row = reserveBackfill.get(
+        args.openedAt,
+        args.closeAt,
+        args.addBytes,
+        addDays,
+        args.deadline,
+        args.totalBytes,
+        args.nowIso,
+        args.nowIso,
+      );
+      const reserved = normalizeBackfill(row);
+      if (!reserved) return null;
+      if (args.write) await args.write();
+      return reserved;
+    },
+    async finishIngestBackfill({ openedAt, closedAt, addBytes = 0, addDays = 0, deadline, totalBytes = 0 }) {
+      const row = finishBackfill.get(openedAt, closedAt, addBytes, addDays, deadline || closedAt, totalBytes);
+      return normalizeBackfill(row) || this.readIngestBackfill();
     },
     async closeIngestBackfill(closedAt) {
       return normalizeBackfill(closeBackfill.get(closedAt)) || this.readIngestBackfill();

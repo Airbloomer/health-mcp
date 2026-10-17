@@ -229,7 +229,17 @@ test("a closed window never reopens", async () => {
   const closedAt = storage.backfill.closed_at;
   const bytes = storage.backfill.bytes;
   const openedAt = storage.backfill.opened_at;
-  await storage.addIngestBackfill({ openedAt: NOW.toISOString(), closeAt: null, addBytes: 50, addDays: 4 });
+  const reserved = await storage.reserveIngestBackfill({
+    openedAt: NOW.toISOString(),
+    closeAt: null,
+    addBytes: 50,
+    totalBytes: 500,
+    deadline: "2026-10-19T12:30:00.000Z",
+    nowIso: NOW.toISOString(),
+    points: [],
+    workouts: [],
+  });
+  assert.equal(reserved, null);
   assert.equal(storage.backfill.opened_at, openedAt);
   assert.equal(storage.backfill.closed_at, closedAt);
   assert.equal(storage.backfill.bytes, bytes);

@@ -1,12 +1,8 @@
--- One counter per auth path per UTC hour. `token_key` is the label "bearer" or
--- "url", not the credential. `window_start` is epoch milliseconds. It is BIGINT
--- because that value does not fit in a 32-bit integer. An accepted post
--- increments `hits` once, and only while `hits` is still under the limit.
--- Rejected posts do not write this table. Old hours are left in place so the
--- accepted post stays a single counter write.
+-- One counter per token per UTC hour. An accepted post increments `hits` once.
+-- Rejected posts do not write this table.
 CREATE TABLE IF NOT EXISTS ingest_quota (
   token_key TEXT NOT NULL,
-  window_start BIGINT NOT NULL,
+  window_start INTEGER NOT NULL,
   hits INTEGER NOT NULL,
   PRIMARY KEY (token_key, window_start)
 );

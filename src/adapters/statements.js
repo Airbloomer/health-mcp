@@ -27,6 +27,45 @@ export const UPSERT_WORKOUT =
 export const POINTS_FOR_DATE =
   "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily WHERE date = ?";
 
+export const POINTS_BETWEEN =
+  "SELECT date, metric, sum_qty, last_qty, last_ts, units, n FROM points_daily WHERE date >= ? AND date <= ?";
+
+/** One statement for many guarded point rows. `?` is a JSON array. */
+export const UPSERT_POINTS_JSON =
+  "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) " +
+  "SELECT json_extract(value, '$.d'), json_extract(value, '$.m'), json_extract(value, '$.s'), " +
+  "json_extract(value, '$.q'), json_extract(value, '$.t'), json_extract(value, '$.u'), json_extract(value, '$.n') " +
+  "FROM json_each(?) WHERE true " +
+  "ON CONFLICT(date, metric) DO UPDATE SET sum_qty = excluded.sum_qty, last_qty = excluded.last_qty, " +
+  "last_ts = excluded.last_ts, units = excluded.units, n = excluded.n " +
+  "WHERE excluded.n >= points_daily.n";
+
+/** One statement for many whole-day replacements. */
+export const REPLACE_POINTS_JSON =
+  "INSERT INTO points_daily (date, metric, sum_qty, last_qty, last_ts, units, n) " +
+  "SELECT json_extract(value, '$.d'), json_extract(value, '$.m'), json_extract(value, '$.s'), " +
+  "json_extract(value, '$.q'), json_extract(value, '$.t'), json_extract(value, '$.u'), json_extract(value, '$.n') " +
+  "FROM json_each(?) WHERE true " +
+  "ON CONFLICT(date, metric) DO UPDATE SET sum_qty = excluded.sum_qty, last_qty = excluded.last_qty, " +
+  "last_ts = excluded.last_ts, units = excluded.units, n = excluded.n";
+
+export const UPSERT_WORKOUTS_JSON =
+  "INSERT INTO workouts (name, start, date, duration_min, kcal) " +
+  "SELECT json_extract(value, '$.n'), json_extract(value, '$.s'), json_extract(value, '$.d'), " +
+  "json_extract(value, '$.m'), json_extract(value, '$.k') " +
+  "FROM json_each(?) WHERE true " +
+  "ON CONFLICT(name, start) DO UPDATE SET date = excluded.date, duration_min = excluded.duration_min, kcal = excluded.kcal";
+
+export const INSERT_WORKOUTS_JSON =
+  "INSERT INTO workouts (name, start, date, duration_min, kcal) " +
+  "SELECT json_extract(value, '$.n'), json_extract(value, '$.s'), json_extract(value, '$.d'), " +
+  "json_extract(value, '$.m'), json_extract(value, '$.k') " +
+  "FROM json_each(?) WHERE true " +
+  "ON CONFLICT(name, start) DO NOTHING";
+
+export const HAS_STORED_DATA =
+  "SELECT 1 AS ok FROM points_daily UNION ALL SELECT 1 FROM workouts UNION ALL SELECT 1 FROM raw_payloads LIMIT 1";
+
 export const WORKOUTS_FOR_DATE =
   "SELECT name, start, date, duration_min, kcal FROM workouts WHERE date = ? ORDER BY start";
 
@@ -54,21 +93,44 @@ export const UPSERT_HINT =
 export const DELETE_HINT = "DELETE FROM export_hint WHERE id = 1";
 
 export const READ_BACKFILL =
-  "SELECT opened_at, closed_at, bytes, days FROM ingest_backfill WHERE id = 1";
+  "SELECT opened_at, closed_at, bytes, days, deadline, total_bytes FROM ingest_backfill WHERE id = 1";
 
-/** Create the window or add to it, and only while it is still open. */
-export const ADD_BACKFILL =
-  "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days) VALUES (1, ?, ?, ?, ?) " +
-  "ON CONFLICT(id) DO UPDATE SET bytes = ingest_backfill.bytes + excluded.bytes, " +
+/**
+ * Insert the window or add bytes, and only while it is still open, under its
+ * stored total, and before its stored deadline. `closed_at` is set in this
+ * statement when the caller closes it or the stored total is reached.
+ * A failed WHERE returns no row.
+ */
+export const RESERVE_BACKFILL =
+  "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) " +
+  "VALUES (1, ?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO UPDATE SET " +
+  "bytes = ingest_backfill.bytes + excluded.bytes, " +
+  "days = ingest_backfill.days + excluded.days, " +
+  "closed_at = CASE " +
+  "WHEN excluded.closed_at IS NOT NULL THEN excluded.closed_at " +
+  "WHEN ingest_backfill.bytes + excluded.bytes >= ingest_backfill.total_bytes THEN ? " +
+  "ELSE ingest_backfill.closed_at END " +
+  "WHERE ingest_backfill.closed_at IS NULL " +
+  "AND ingest_backfill.bytes + excluded.bytes <= ingest_backfill.total_bytes " +
+  "AND ? < ingest_backfill.deadline " +
+  "RETURNING opened_at, closed_at, bytes, days, deadline, total_bytes";
+
+/** Close the window, creating a closed row when none exists. Already closed is unchanged. */
+export const FINISH_BACKFILL =
+  "INSERT INTO ingest_backfill (id, opened_at, closed_at, bytes, days, deadline, total_bytes) " +
+  "VALUES (1, ?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(id) DO UPDATE SET " +
+  "bytes = ingest_backfill.bytes + excluded.bytes, " +
   "days = ingest_backfill.days + excluded.days, " +
   "closed_at = COALESCE(ingest_backfill.closed_at, excluded.closed_at) " +
   "WHERE ingest_backfill.closed_at IS NULL " +
-  "RETURNING opened_at, closed_at, bytes, days";
+  "RETURNING opened_at, closed_at, bytes, days, deadline, total_bytes";
 
 /** Mark the window closed. A row that is already closed is left as it is. */
 export const CLOSE_BACKFILL =
   "UPDATE ingest_backfill SET closed_at = ? WHERE id = 1 AND closed_at IS NULL " +
-  "RETURNING opened_at, closed_at, bytes, days";
+  "RETURNING opened_at, closed_at, bytes, days, deadline, total_bytes";
 
 /** D1 rejects batches larger than this. */
 export const D1_BATCH_LIMIT = 500;
