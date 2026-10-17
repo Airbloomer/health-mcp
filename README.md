@@ -183,7 +183,7 @@ Health Auto Export should post recent days, not a full history and not today alo
 
 - **Format:** JSON, export version 2.
 - **Metrics:** Dietary Energy, Protein, Carbohydrates, Total Fat, Active Energy, Basal Energy Burned, Step Count, Weight, and Body Fat Percentage. Use one total per metric per day, not hourly buckets.
-- **Date range:** today and yesterday. Yesterday is the finished day. Today is the running total, sent again as the day fills in. A range of today only never sends yesterday's finished total. A full history is not stored here: points older than yesterday are dropped (`INGEST_MAX_AGE_DAYS`, default `1`, counted in the configured time zone).
+- **Date range:** today and yesterday. Yesterday is the finished day. Today is the running total, sent again as the day fills in. A range of today only never sends yesterday's finished total. A full history is not stored here: points older than yesterday are dropped (`INGEST_MAX_AGE_DAYS`, default `1`, counted in the configured time zone). A date more than one day ahead is dropped too.
 - **Schedule:** a few times a day, not every hour. The two automations share one token, and each run is a post. The default limit is 6 accepted posts per token per hour (`INGEST_RATE_LIMIT_PER_HOUR`).
 - **Workouts:** a second automation with the same URL, header, format, version, and date range. Leave route and per-second workout metrics off.
 - **Batch requests:** leave them off, so one day is not split across posts.
