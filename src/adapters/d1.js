@@ -1,14 +1,20 @@
 import { shouldStoreRaw } from "../core/aggregate.js";
 import { D1DailyLimitError, d1DailyLimitKind } from "../core/free-tier.js";
+import { hintAction, partitionIngest, withExportHint } from "../core/ingest-guard.js";
 import { summarizeDay } from "../core/summary.js";
 import {
   D1_BATCH_LIMIT,
+  DELETE_HINT,
   INSERT_RAW,
   LIST_METRICS,
   METRIC_RANGE,
   POINTS_FOR_DATE,
-  UPSERT_POINT,
+  READ_HINT,
+  READ_QUOTA,
   REPLACE_POINT,
+  UPSERT_HINT,
+  UPSERT_POINT,
+  UPSERT_QUOTA,
   INSERT_WORKOUT_IF_NEW,
   UPSERT_WORKOUT,
   WORKOUTS_FOR_DATE,
@@ -18,8 +24,12 @@ import {
 /**
  * Cloudflare D1 adapter. `db` is the binding (`env.DB`).
  * Schema comes from `migrations/` via `wrangler d1 migrations apply`.
- * Every prepared statement is sent. A documented daily-limit error is rethrown
- * as D1DailyLimitError so the caller can answer 429. Writes are not dropped first.
+ * Every prepared statement is sent through `db.batch()`. D1 rejects
+ * transaction statements, so this adapter never sends those.
+ * A documented daily-limit error is rethrown as D1DailyLimitError so the
+ * caller can answer 429. Writes are not dropped first.
+ * Rows whose stored values already match are omitted, so a repeat post
+ * does not write them.
  */
 export class D1Storage {
   constructor(db) {
@@ -36,12 +46,47 @@ export class D1Storage {
     }
   }
 
-  async insertIngest(batch) {
+  async rowsFor(sql, ...params) {
+    const result = await this.run(() => this.db.prepare(sql).bind(...params).all());
+    return result?.results || [];
+  }
+
+  async loadStored(dates) {
+    const points = [];
+    const workouts = [];
+    for (const date of dates) {
+      points.push(...await this.rowsFor(POINTS_FOR_DATE, date));
+      workouts.push(...await this.rowsFor(WORKOUTS_FOR_DATE, date));
+    }
+    return { points, workouts };
+  }
+
+  async readIngestQuota(tokenKey, windowStart) {
+    const rows = await this.rowsFor(READ_QUOTA, tokenKey, windowStart);
+    return Number(rows[0]?.hits ?? 0);
+  }
+
+  async readExportHint() {
+    const rows = await this.rowsFor(READ_HINT);
+    return rows[0]?.hint ?? null;
+  }
+
+  async setExportHint(hint) {
+    const action = hintAction(await this.readExportHint(), hint);
+    if (action === "skip") return false;
+    const statement = action === "clear" ? this.db.prepare(DELETE_HINT).bind() : this.db.prepare(UPSERT_HINT).bind(hint);
+    await this.run(() => this.db.batch([statement]));
+    return true;
+  }
+
+  async insertIngest(batch, options = {}) {
+    const dates = [...new Set([...(batch.points || []).map((point) => point.date), ...(batch.workouts || []).map((workout) => workout.date)])];
+    const diff = partitionIngest(batch.points, batch.workouts, await this.loadStored(dates));
     const statements = [];
     if (shouldStoreRaw(batch)) {
       statements.push(this.db.prepare(INSERT_RAW).bind(batch.id, batch.date, batch.receivedAt, batch.bytes, batch.payload));
     }
-    for (const point of batch.points) {
+    for (const point of diff.points) {
       statements.push(
         this.db.prepare(point.replace ? REPLACE_POINT : UPSERT_POINT).bind(
           point.date,
@@ -54,21 +99,29 @@ export class D1Storage {
         ),
       );
     }
-    for (const workout of batch.workouts) {
+    for (const workout of diff.workouts) {
       statements.push(
         this.db.prepare(workout.insertOnly ? INSERT_WORKOUT_IF_NEW : UPSERT_WORKOUT).bind(workout.name, workout.start, workout.date, workout.duration_min, workout.kcal),
       );
     }
+    if (options.quota) {
+      statements.push(this.db.prepare(UPSERT_QUOTA).bind(options.quota.tokenKey, options.quota.windowStart));
+    }
+    const action = hintAction(options.hint === undefined ? null : await this.readExportHint(), options.hint);
+    if (action === "clear") statements.push(this.db.prepare(DELETE_HINT).bind());
+    if (action === "set") statements.push(this.db.prepare(UPSERT_HINT).bind(options.hint));
     for (let i = 0; i < statements.length; i += D1_BATCH_LIMIT) {
       const chunk = statements.slice(i, i + D1_BATCH_LIMIT);
       if (chunk.length) await this.run(() => this.db.batch(chunk));
     }
+    return { written: diff.written, unchanged: diff.unchanged };
   }
 
   async queryDaySummary(date) {
     const points = await this.run(() => this.db.prepare(POINTS_FOR_DATE).bind(date).all());
     const workouts = await this.run(() => this.db.prepare(WORKOUTS_FOR_DATE).bind(date).all());
-    return summarizeDay(date, points.results, workouts.results);
+    const hint = await this.readExportHint();
+    return withExportHint(summarizeDay(date, points.results, workouts.results), hint);
   }
 
   async queryMetricRange(metric, startDate, endDate) {

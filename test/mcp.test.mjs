@@ -55,7 +55,7 @@ test("mcp rejects a missing or wrong bearer token", async () => {
 
 test("mcp lists only read tools and serves each one", async () => {
   const storage = new MemoryStorage();
-  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z") };
+  const ctx = { token: "tok", storage, now: new Date("2026-10-16T12:00:00Z"), ingestMaxAgeDays: 36500, ingestRatePerHour: 0 };
   const ingested = await handleRequest(request("/ingest", { method: "POST", body: JSON.stringify(sample) }), ctx);
   assert.equal(ingested.status, 200);
 

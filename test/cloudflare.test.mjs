@@ -11,6 +11,13 @@ import { expectedSummary, summaryDate } from "./expected.mjs";
 
 const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.url), "utf8"));
 
+const fixtureClock = {
+  now: new Date("2026-10-16T12:00:00Z"),
+  INGEST_MAX_AGE_DAYS: "30",
+  INGEST_MAX_BODY_BYTES: "5000000",
+  INGEST_RATE_LIMIT_PER_HOUR: "0",
+};
+
 function d1FromSqlite(db, writes) {
   function statement(sql, params = []) {
     return {
@@ -80,7 +87,7 @@ function sevenDayPayload() {
 test("cloudflare adapter ingests and summarizes through D1", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
-  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
+  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
 
   const denied = await worker.fetch(new Request(`http://example.test/summary?date=${summaryDate}`), env);
   assert.equal(denied.status, 401);
@@ -105,7 +112,17 @@ test("cloudflare adapter splits D1 writes into batches of 500", async () => {
   const batches = [];
   const db = {
     prepare(sql) {
-      return { bind(...params) { return { sql, params }; } };
+      return {
+        bind(...params) {
+          return {
+            sql,
+            params,
+            async all() {
+              return { results: [] };
+            },
+          };
+        },
+      };
     },
     async batch(statements) {
       batches.push(statements.length);
@@ -137,7 +154,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
   const writes = { n: 0 };
-  const env = { DB: d1FromSqlite(db, writes), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
+  const env = { DB: d1FromSqlite(db, writes), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const payload = sevenDayPayload();
   const sampleCount = payload.data.metrics.reduce((sum, metric) => sum + metric.data.length, 0);
 
@@ -175,7 +192,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
     body: JSON.stringify(payload),
   }), env);
   assert.equal(again.status, 200);
-  assert.ok(writes.n - before < 200);
+  assert.equal(writes.n - before, 0);
   const retried = await (await worker.fetch(
     new Request("http://example.test/summary?date=2026-10-08", { headers: { authorization: "Bearer tok" } }),
     env,
@@ -188,7 +205,7 @@ test("a 7-day all-metrics upload writes fewer than 200 rows", async () => {
 test("a partial re-send does not overwrite the full-day total", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
-  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
+  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const post = (body) => worker.fetch(new Request("http://example.test/ingest", {
     method: "POST",
     headers: { authorization: "Bearer tok", "content-type": "application/json" },
@@ -256,7 +273,7 @@ test("D1 skips a raw payload larger than 1.5MB", async () => {
 test("cloudflare adapter serves the read-only MCP tools", async () => {
   const db = new Database(":memory:");
   applySqliteMigrations(db);
-  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC" };
+  const env = { DB: d1FromSqlite(db), HEALTH_INGEST_TOKEN: "tok", HEALTH_TIMEZONE: "UTC", ...fixtureClock };
   const headers = { authorization: "Bearer tok", "content-type": "application/json", accept: "application/json, text/event-stream" };
   const denied = await worker.fetch(new Request("http://example.test/mcp", { method: "POST", body: "{}" }), env);
   assert.equal(denied.status, 401);

@@ -15,7 +15,7 @@ npx wrangler login
 npx wrangler d1 create health-mcp
 ```
 
-Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
+Paste the printed database id into `database_id` in `wrangler.toml`. Apply migrations, including `0002_daily_points.sql` and `0003_ingest_guards.sql`, **before** `wrangler deploy`. The worker reads `points_daily`, so deploying first makes ingest fail.
 
 ```bash
 npx wrangler d1 migrations apply health-mcp --remote
@@ -23,7 +23,7 @@ printf '%s' 'replace-with-a-long-random-token' | npx wrangler secret put HEALTH_
 npx wrangler deploy
 ```
 
-`migrations apply` runs every pending file in order: `0001_init.sql`, then `0002_daily_points.sql`. Do not deploy until both have been applied.
+`migrations apply` runs every pending file in order: `0001_init.sql`, then `0002_daily_points.sql`, then `0003_ingest_guards.sql`. Do not deploy until all three have been applied.
 
 For local development, apply the same migrations before `wrangler dev`:
 
@@ -93,6 +93,9 @@ Import an export from Apple Health into that database with `node src/cli/import-
 | `HEALTH_SHORTCUTS_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Raw-sample mode of `POST /ingest/shortcuts` only. Comma-separated, case-insensitive fragments of source names; the first fragment found in a source name wins that metric-day. Default `watch,iphone`. See [shortcuts.md](shortcuts.md). |
 | `HEALTH_SOURCE_PRIORITY` | no | Wrangler `[vars]`, or the process environment | Comma-separated `sourceName` values from an export of Apple Health. When an export has several sources for one metric-day, the first listed source that has samples wins. Unset, summed metrics keep the largest total, and weight and body fat keep the newest reading. |
 | `MCP_ALLOWED_ORIGINS` | no | Wrangler `[vars]`, or the process environment | Comma-separated `Origin` values allowed to call `/mcp`. Empty by default, which rejects every request that sends `Origin`. Requests with no `Origin` header stay allowed. |
+| `INGEST_MAX_AGE_DAYS` | no | Wrangler `[vars]`, or the process environment | How many days before today Health Auto Export JSON on `POST /ingest` may include. Default `1` (today and yesterday in `HEALTH_TIMEZONE`). Older points are dropped and counted as `dropped_stale`. `POST /import/apple-health` ignores this. |
+| `INGEST_MAX_BODY_BYTES` | no | Wrangler `[vars]`, or the process environment | Maximum JSON ingest body in bytes. Default `1000000`. A larger body returns `413` with `payload_too_large`. Capped at 20,000,000. |
+| `INGEST_RATE_LIMIT_PER_HOUR` | no | Wrangler `[vars]`, or the process environment | Accepted ingest posts per token per UTC hour. Default `6`. `0` disables the limit. Over the limit returns `429` with `Retry-After`. |
 
 Copy [`.env.example`](../.env.example) to `.env` for Node, or [`dev.vars.example`](../dev.vars.example) to `.dev.vars` for `wrangler dev`. Both real files are gitignored.
 
@@ -111,6 +114,7 @@ npm test
 
 ```
 src/core                 parse, daily aggregate, summarize, bearer auth, HTTP, MCP
+src/core/ingest-guard.js recency window, body limit, rate limit, unchanged rows
 src/core/hk.js           HealthKit quantity and workout names
 src/core/apple-export.js streaming export.xml and zip parser
 src/core/health-export-pro.js
@@ -128,6 +132,7 @@ src/adapters/postgres.js
 src/index.js             Wrangler entry
 migrations/0001_init.sql
 migrations/0002_daily_points.sql
+migrations/0003_ingest_guards.sql
 ```
 
 The storage interface is `insertIngest(batch)`, `queryDaySummary(date)`, `queryMetricRange(metric, startDate, endDate)`, `listMetrics()`, and `listWorkouts(startDate, endDate)`. `batch.points` is already one row per `(metric, date)` (`sum_qty`, `last_qty`, `last_ts`, `units`, `n`). `storeRaw: false` skips the raw body. `queryDaySummary` returns the `/summary` object. The three range methods only read. `MemoryStorage` in `src/core/memory.js` is the reference implementation.

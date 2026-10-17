@@ -59,7 +59,16 @@ test("D1 adapter sends every statement and surfaces the daily write limit", asyn
   const batches = [];
   const db = {
     prepare() {
-      return { bind() { return { sql: "x" }; } };
+      return {
+        bind() {
+          return {
+            sql: "x",
+            async all() {
+              return { results: [] };
+            },
+          };
+        },
+      };
     },
     async batch(statements) {
       batches.push(statements.length);
@@ -105,7 +114,16 @@ test("a D1 daily write limit becomes 429 with Retry-After and limit_hit", async 
       HEALTH_INGEST_TOKEN: "tok",
       DB: {
         prepare() {
-          return { bind() { return { sql: "x" }; } };
+          return {
+            bind() {
+              return {
+                sql: "x",
+                async all() {
+                  return { results: [] };
+                },
+              };
+            },
+          };
         },
         async batch() {
           throw new Error(WRITE_LIMIT);

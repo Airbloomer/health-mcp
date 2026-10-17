@@ -16,7 +16,7 @@ const sample = JSON.parse(fs.readFileSync(new URL("./sample.json", import.meta.u
 
 test("migration SQL stays portable", () => {
   const files = migrationFiles();
-  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql"]);
+  assert.deepEqual(files.map((file) => file.id), ["0001_init.sql", "0002_daily_points.sql", "0003_ingest_guards.sql"]);
   for (const file of files) {
     assert.doesNotMatch(file.sql, /AUTOINCREMENT|WITHOUT ROWID|INSERT OR REPLACE|PRAGMA/i);
   }
@@ -47,7 +47,15 @@ test("daily migration rolls per-sample rows into one row per metric and day", ()
 test("node sqlite adapter serves ingest and summary over HTTP", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-mcp-"));
   const storage = await createNodeStorage({ SQLITE_PATH: path.join(dir, "nested", "health.sqlite") });
-  const server = await startServer({ storage, token: "tok", timeZone: "UTC", port: 0, host: "127.0.0.1" });
+  const server = await startServer({
+    storage,
+    token: "tok",
+    timeZone: "UTC",
+    port: 0,
+    host: "127.0.0.1",
+    now: new Date("2026-10-14T20:00:00Z"),
+    ingestRatePerHour: 0,
+  });
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
   try {
@@ -157,6 +165,7 @@ test("node storage rejects an unsupported DATABASE_URL", async () => {
 
 test("postgres adapter writes portable upserts and summarizes returned rows", async () => {
   const queries = [];
+  let pointReads = 0;
   const rowsFor = (sql) => {
     if (sql.includes("GROUP BY metric")) return [{ metric: "step_count" }];
     if (sql.includes("FROM points_daily") && sql.includes(">=")) {
@@ -170,7 +179,9 @@ test("postgres adapter writes portable upserts and summarizes returned rows", as
         n: "1",
       }];
     }
-    if (sql.includes("FROM points_daily")) {
+    if (sql === toPostgres(POINTS_FOR_DATE)) {
+      pointReads += 1;
+      if (pointReads === 1) return [];
       return [{
         date: summaryDate,
         metric: "step_count",
